@@ -1,0 +1,45 @@
+export const definition = {
+  type: "function" as const,
+  function: {
+    name: "glob",
+    description:
+      "Find files matching a glob pattern. Returns a list of matching file paths.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: {
+          type: "string",
+          description: 'Glob pattern to match (e.g., "**/*.ts", "src/**/*.tsx")',
+        },
+        cwd: {
+          type: "string",
+          description: "Directory to search in. Defaults to current working directory.",
+        },
+      },
+      required: ["pattern"],
+    },
+  },
+};
+
+export async function execute(args: { pattern: string; cwd?: string }): Promise<string> {
+  try {
+    const glob = new Bun.Glob(args.pattern);
+    const results: string[] = [];
+    const cwd = args.cwd || process.cwd();
+
+    for await (const file of glob.scan({ cwd, dot: false })) {
+      results.push(file);
+      if (results.length >= 500) {
+        results.push("...(truncated at 500 results)");
+        break;
+      }
+    }
+
+    if (results.length === 0) {
+      return "No files matched the pattern.";
+    }
+    return results.join("\n");
+  } catch (err: any) {
+    return `Error: ${err.message}`;
+  }
+}
