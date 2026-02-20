@@ -2,8 +2,10 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 export const AVAILABLE_MODELS = [
-  { id: "MiniMax-M2.5", label: "MiniMax-M2.5", description: "~60 tps, full reasoning" },
-  { id: "MiniMax-M2.5-highspeed", label: "MiniMax-M2.5-highspeed", description: "~100 tps, faster" },
+  { id: "MiniMax-M2.5", label: "MiniMax-M2.5", description: "Latest, ~60 tps" },
+  { id: "MiniMax-M2.5-highspeed", label: "MiniMax-M2.5-highspeed", description: "Latest fast, ~100 tps" },
+  { id: "MiniMax-M2.1", label: "MiniMax-M2.1", description: "Previous gen, ~60 tps" },
+  { id: "MiniMax-M2.1-highspeed", label: "MiniMax-M2.1-highspeed", description: "Previous gen fast, ~100 tps" },
 ] as const;
 
 export const MODEL_IDS = AVAILABLE_MODELS.map((m) => m.id);
@@ -66,6 +68,7 @@ export interface StreamCallbacks {
 
 export interface StreamResult {
   content: string;
+  reasoningDetails: Array<{ type: "text"; text: string }>;
   toolCalls: AccumulatedToolCall[];
   usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
   finishReason: string;
@@ -80,6 +83,7 @@ export async function streamChat(
   signal?: AbortSignal
 ): Promise<StreamResult> {
   let content = "";
+  const reasoningDetails: Array<{ type: "text"; text: string }> = [];
   const toolCallsMap = new Map<number, AccumulatedToolCall>();
   let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   let finishReason = "";
@@ -87,11 +91,11 @@ export async function streamChat(
 
   try {
     const hasTools = tools && tools.length > 0;
-    // Build params without stream_options — MiniMax may not support it
     const createParams: any = {
       model,
       messages,
       stream: true,
+      temperature: 1.0,
     };
     if (hasTools) {
       createParams.tools = tools;
@@ -100,7 +104,7 @@ export async function streamChat(
 
     const stream: any = await client.chat.completions.create(
       createParams,
-      { signal }
+      { signal, headers: { "X-Reasoning-Split": "true" } }
     );
 
     for await (const chunk of stream) {
@@ -135,10 +139,11 @@ export async function streamChat(
       if (!delta) continue;
 
       // Handle reasoning_details from MiniMax (array of {text} objects)
-      const reasoningDetails = (delta as any).reasoning_details;
-      if (reasoningDetails && Array.isArray(reasoningDetails)) {
-        for (const item of reasoningDetails) {
+      const chunkReasoningDetails = (delta as any).reasoning_details;
+      if (chunkReasoningDetails && Array.isArray(chunkReasoningDetails)) {
+        for (const item of chunkReasoningDetails) {
           if (item?.text) {
+            reasoningDetails.push({ type: "text", text: item.text });
             callbacks.onReasoningChunk?.(item.text);
           }
         }
@@ -146,6 +151,7 @@ export async function streamChat(
       // Also handle reasoning_content for compatibility
       const reasoningContent = (delta as any).reasoning_content;
       if (reasoningContent) {
+        reasoningDetails.push({ type: "text", text: reasoningContent });
         callbacks.onReasoningChunk?.(reasoningContent);
       }
 
@@ -191,5 +197,5 @@ export async function streamChat(
 
   const toolCalls = Array.from(toolCallsMap.values());
   callbacks.onDone?.(usage);
-  return { content, toolCalls, usage, finishReason };
+  return { content, reasoningDetails, toolCalls, usage, finishReason };
 }

@@ -3,7 +3,7 @@ export const definition = {
   function: {
     name: "glob",
     description:
-      "Find files matching a glob pattern. Returns a list of matching file paths.",
+      "Find files by glob pattern. Returns one path per line. Max 500 results. Ignores dotfiles. Examples: '**/*.ts' for all TypeScript files, 'src/**/*.test.ts' for test files in src.",
     parameters: {
       type: "object",
       properties: {

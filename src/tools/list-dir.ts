@@ -6,7 +6,7 @@ export const definition = {
   function: {
     name: "list_directory",
     description:
-      "List files and directories in a given path with optional depth limit.",
+      "List directory contents with file sizes. Directories end with '/'. Default max_depth=1 (non-recursive). Set max_depth=2 or 3 to see nested structure.",
     parameters: {
       type: "object",
       properties: {

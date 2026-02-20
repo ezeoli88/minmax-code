@@ -3,7 +3,7 @@ export const definition = {
   function: {
     name: "bash",
     description:
-      "Execute a bash command in the shell. Use for running scripts, installing packages, git operations, and other terminal tasks. Commands run with a 30 second timeout.",
+      "Execute a bash command. Use for: running scripts, git operations, installing packages, or any terminal task. Timeout: 30s. Output truncated at 10KB. Prefer other tools over bash when possible (e.g., use read_file instead of cat, glob instead of find).",
     parameters: {
       type: "object",
       properties: {

@@ -46,18 +46,27 @@ export function useChat({
   const messageCountRef = useRef(0);
 
   const getSystemPrompt = useCallback((): string => {
-    let systemPrompt = `You are a coding assistant running in a terminal. You help users with software engineering tasks.
-Current directory: ${process.cwd()}
-Current mode: ${mode}`;
+    let systemPrompt: string;
 
     if (mode === "PLAN") {
-      systemPrompt += `\n\nYou are in PLAN mode. RULES:
-- You CAN use read-only tools: read_file, glob, grep, list_directory. Use them freely to explore and understand the codebase.
-- You MUST NOT write code, create files, edit files, or run bash commands.
-- If the user asks you to write code, edit files, run commands, or execute any modification, tell them: "I'm in PLAN mode — I can read and analyze but not modify. Switch to BUILDER mode (press Tab) to execute changes."
-- Focus on analyzing, planning, explaining, and suggesting strategies.`;
+      systemPrompt = `You are a coding assistant in a terminal (READ-ONLY mode).
+Working directory: ${process.cwd()}
+
+Available tools: read_file, glob, grep, list_directory (read-only).
+You CANNOT write, edit, or run commands. Tell the user to switch to BUILDER mode (Tab) for modifications.
+Focus on: analysis, planning, explaining code, suggesting strategies.`;
     } else {
-      systemPrompt += `\n\nYou are in BUILDER mode. You can execute tools to help the user. Use tools when needed to accomplish tasks.`;
+      systemPrompt = `You are a coding assistant in a terminal.
+Working directory: ${process.cwd()}
+
+TOOL USAGE:
+- Read before editing: always use read_file before edit_file to see current content
+- Use edit_file for modifications to existing files, write_file only for new files
+- Use glob/grep to find files before reading them
+- Use bash for git, npm, and other CLI operations
+- Execute one logical step at a time, verify results, then proceed
+
+Be concise. Show relevant code, skip obvious explanations.`;
     }
 
     const agentPath = join(process.cwd(), "agent.md");
@@ -246,11 +255,14 @@ Current mode: ${mode}`;
             return updated;
           });
 
-          // Build history entry
+          // Build history entry — preserve reasoning_details for MiniMax reasoning chain
           const historyMsg: any = {
             role: "assistant" as const,
             content: result.content || "",
           };
+          if (result.reasoningDetails.length > 0) {
+            historyMsg.reasoning_details = result.reasoningDetails;
+          }
           if (result.toolCalls.length > 0) {
             historyMsg.tool_calls = result.toolCalls.map((tc) => ({
               id: tc.id,

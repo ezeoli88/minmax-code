@@ -46,7 +46,7 @@ export function CommandPalette({
   const [subIdx, setSubIdx] = useState(0);
 
   const themeKeys = Object.keys(themes);
-  const modelIds = [...MODEL_IDS];
+  const modelIds: string[] = [...MODEL_IDS];
 
   useInput((input, key) => {
     if (subMenu) {

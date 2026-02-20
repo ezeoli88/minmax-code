@@ -5,7 +5,7 @@ export const definition = {
   function: {
     name: "read_file",
     description:
-      "Read the contents of a file. Optionally specify a line range to read only a portion.",
+      "Read a file's contents with line numbers. Returns numbered lines (format: '1\\tline content'). Files over 2000 lines are automatically truncated. Use start_line/end_line for large files, e.g., start_line=100, end_line=200.",
     parameters: {
       type: "object",
       properties: {

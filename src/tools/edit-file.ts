@@ -5,7 +5,7 @@ export const definition = {
   function: {
     name: "edit_file",
     description:
-      "Edit a file by replacing an exact string match. The old_str must appear exactly once in the file. Use this for precise edits.",
+      "Replace an exact string in a file. old_str must match exactly once (including whitespace/indentation). If old_str appears 0 or >1 times, the edit fails — add more surrounding context to make it unique. Preferred over write_file for modifying existing files.",
     parameters: {
       type: "object",
       properties: {

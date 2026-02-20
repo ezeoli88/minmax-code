@@ -6,7 +6,7 @@ export const definition = {
   function: {
     name: "grep",
     description:
-      "Search file contents using a regex pattern. Returns matching lines with file paths and line numbers.",
+      "Search file contents by regex. Returns 'path:line: content' per match. Max 200 matches. Skips node_modules and dotfiles. Use 'include' to filter by extension, e.g., include='*.ts'. Use context_lines for surrounding context.",
     parameters: {
       type: "object",
       properties: {

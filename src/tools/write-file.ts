@@ -5,7 +5,7 @@ export const definition = {
   type: "function" as const,
   function: {
     name: "write_file",
-    description: "Write content to a file. Creates the file and parent directories if they don't exist. Overwrites existing content.",
+    description: "Create or overwrite a file with the given content. Creates parent directories automatically. WARNING: Completely replaces existing content. For partial edits use edit_file instead.",
     parameters: {
       type: "object",
       properties: {
