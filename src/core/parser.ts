@@ -77,12 +77,20 @@ export function parseModelOutput(raw: string): ParsedOutput {
     }
   }
 
-  // Also handle stray opening tags that haven't completed yet
-  // e.g., "<thi" at the end of streaming
-  const partialTagMatch = working.match(/<[a-z/!][^>]*$/i);
+  // Strip trailing partial known tags only (e.g. "<thi", "<minimax:tool")
+  // Don't strip regular HTML tags like <code>, <div>, <strong> etc.
+  const partialTagMatch = working.match(/<\/?[a-z][^>]*$/i);
   if (partialTagMatch) {
-    working = working.slice(0, partialTagMatch.index);
-    pending = true;
+    const partial = partialTagMatch[0].toLowerCase();
+    if (
+      "<think>".startsWith(partial) ||
+      "</think>".startsWith(partial) ||
+      "<minimax:tool_call>".startsWith(partial) ||
+      "</minimax:tool_call>".startsWith(partial)
+    ) {
+      working = working.slice(0, partialTagMatch.index);
+      pending = true;
+    }
   }
 
   content = working.trim();

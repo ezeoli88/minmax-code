@@ -1,8 +1,13 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useImperativeHandle, forwardRef } from "react";
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
 import type { Theme } from "../config/themes.js";
 import type { Mode } from "../hooks/useMode.js";
+
+export interface InputHandle {
+  clear: () => void;
+  replaceAtQuery: (filePath: string) => void;
+}
 
 interface InputProps {
   mode: Mode;
@@ -10,10 +15,33 @@ interface InputProps {
   isLoading: boolean;
   onSubmit: (value: string) => void;
   onSlash?: () => void;
+  onAtQueryChange?: (query: string | null) => void;
+  suppressSubmit?: boolean;
 }
 
-export function Input({ mode, theme, isLoading, onSubmit, onSlash }: InputProps) {
+export const Input = React.memo(forwardRef<InputHandle, InputProps>(function Input(
+  { mode, theme, isLoading, onSubmit, onSlash, onAtQueryChange, suppressSubmit },
+  ref
+) {
   const [value, setValue] = useState("");
+  const prevAtQueryRef = useRef<string | null>(null);
+
+  useImperativeHandle(ref, () => ({
+    clear: () => {
+      setValue("");
+      if (prevAtQueryRef.current !== null) {
+        prevAtQueryRef.current = null;
+        onAtQueryChange?.(null);
+      }
+    },
+    replaceAtQuery: (filePath: string) => {
+      setValue((prev) => prev.replace(/@([^\s]*)$/, `@${filePath} `));
+      if (prevAtQueryRef.current !== null) {
+        prevAtQueryRef.current = null;
+        onAtQueryChange?.(null);
+      }
+    },
+  }), [onAtQueryChange]);
 
   const handleChange = (newValue: string) => {
     // Filter out SGR mouse escape sequences that leak through stdin
@@ -24,16 +52,24 @@ export function Input({ mode, theme, isLoading, onSubmit, onSlash }: InputProps)
       return;
     }
     setValue(cleaned);
+
+    // Notify parent only when @ query changes
+    const match = cleaned.match(/@([^\s]*)$/);
+    const newAtQuery = match ? match[1] : null;
+    if (newAtQuery !== prevAtQueryRef.current) {
+      prevAtQueryRef.current = newAtQuery;
+      onAtQueryChange?.(newAtQuery);
+    }
   };
 
   const prompt = mode === "PLAN" ? "plan" : "build";
   const promptColor = mode === "PLAN" ? theme.planBadge : theme.builderBadge;
 
   const handleSubmit = (val: string) => {
+    if (suppressSubmit) return;
     const trimmed = val.trim();
     if (!trimmed) return;
     onSubmit(trimmed);
-    setValue("");
   };
 
   return (
@@ -45,8 +81,8 @@ export function Input({ mode, theme, isLoading, onSubmit, onSlash }: InputProps)
         value={value}
         onChange={handleChange}
         onSubmit={handleSubmit}
-        placeholder="Type a message or /help..."
+        placeholder="Type a message, / for commands, @ for files..."
       />
     </Box>
   );
-}
+}));

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useStdin } from "ink";
 
 export function useMouseScroll(
@@ -6,6 +6,8 @@ export function useMouseScroll(
   active = true
 ) {
   const { stdin, setRawMode, isRawModeSupported } = useStdin();
+  const onScrollRef = useRef(onScroll);
+  onScrollRef.current = onScroll;
 
   useEffect(() => {
     if (!active || !isRawModeSupported || !stdin) return;
@@ -22,8 +24,8 @@ export function useMouseScroll(
       const match = chunk.match(/\x1b\[<(\d+);\d+;\d+[Mm]/);
       if (match) {
         const mode = parseInt(match[1], 10);
-        if (mode === 64) onScroll("up");
-        if (mode === 65) onScroll("down");
+        if (mode === 64) onScrollRef.current("up");
+        if (mode === 65) onScrollRef.current("down");
       }
     };
 
@@ -34,5 +36,5 @@ export function useMouseScroll(
       process.stdout.write("\x1b[?1000l");
       process.stdout.write("\x1b[?1006l");
     };
-  }, [stdin, isRawModeSupported, active, onScroll]);
+  }, [stdin, isRawModeSupported, active]);
 }

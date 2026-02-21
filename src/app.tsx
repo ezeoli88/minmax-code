@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { loadConfig, updateConfig, type AppConfig } from "./config/settings.js";
 import { themes } from "./config/themes.js";
 import { createClient } from "./core/api.js";
@@ -24,7 +24,7 @@ export function App({ onExit }: AppProps) {
     return <ApiKeyPrompt theme={theme} onSubmit={handleApiKey} />;
   }
 
-  const client = createClient(config.apiKey);
+  const client = useMemo(() => createClient(config.apiKey), [config.apiKey]);
 
   return (
     <ChatInterface

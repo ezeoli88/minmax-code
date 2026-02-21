@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
 import type { Theme } from "../config/themes.js";
 import { themes } from "../config/themes.js";
@@ -34,7 +34,7 @@ interface CommandPaletteProps {
   onClose: () => void;
 }
 
-export function CommandPalette({
+export const CommandPalette = React.memo(function CommandPalette({
   theme,
   currentTheme,
   currentModel,
@@ -45,8 +45,8 @@ export function CommandPalette({
   const [subMenu, setSubMenu] = useState<"theme" | "model" | null>(null);
   const [subIdx, setSubIdx] = useState(0);
 
-  const themeKeys = Object.keys(themes);
-  const modelIds: string[] = [...MODEL_IDS];
+  const themeKeys = useMemo(() => Object.keys(themes), []);
+  const modelIds = useMemo(() => [...MODEL_IDS] as string[], []);
 
   useInput((input, key) => {
     if (subMenu) {
@@ -107,10 +107,14 @@ export function CommandPalette({
     }
   });
 
+  // Fixed content height = COMMANDS.length to keep layout stable across views
+  const fixedRows = COMMANDS.length;
+
   if (subMenu) {
     const items = subMenu === "theme" ? themeKeys : modelIds;
     const current = subMenu === "theme" ? currentTheme : currentModel;
     const title = subMenu === "theme" ? "Theme" : "Model";
+    const padCount = Math.max(0, fixedRows - items.length);
 
     return (
       <Box
@@ -118,6 +122,7 @@ export function CommandPalette({
         borderStyle="round"
         borderColor={theme.accent}
         paddingX={1}
+        flexShrink={0}
       >
         <Text bold color={theme.accent}>
           {title}
@@ -134,6 +139,9 @@ export function CommandPalette({
             </Text>
           );
         })}
+        {Array.from({ length: padCount }, (_, i) => (
+          <Text key={`pad-${i}`}>{" "}</Text>
+        ))}
         <Text color={theme.dimText}>↑↓ navigate · enter select · esc back</Text>
       </Box>
     );
@@ -163,4 +171,4 @@ export function CommandPalette({
       <Text color={theme.dimText}>↑↓ navigate · enter select · esc close</Text>
     </Box>
   );
-}
+});

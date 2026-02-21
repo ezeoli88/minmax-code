@@ -1,7 +1,8 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useRef } from "react";
 import { Box, Text, useStdout } from "ink";
 import type { Theme } from "../config/themes.js";
 import type { ChatMessage } from "../hooks/useChat.js";
+import { ThinkingIndicator } from "./ThinkingIndicator.js";
 
 interface MessageListProps {
   messages: ChatMessage[];
@@ -12,6 +13,7 @@ interface MessageListProps {
 
 // ── A single line ready to render ──────────────────────────────────
 interface VLine {
+  key: string;
   text: string;
   color?: string;
   bold?: boolean;
@@ -90,7 +92,8 @@ function messageToLines(
         lines.push({ ...ml, text: "  " + ml.text });
       }
     } else if (msg.isStreaming) {
-      lines.push({ text: "  Thinking...", color: theme.dimText });
+      // Placeholder line — the actual animated indicator renders separately
+      lines.push({ text: "  ...", color: theme.dimText });
     }
 
     // Tool calls
@@ -228,7 +231,7 @@ function markdownToLines(text: string, theme: Theme, width: number): VLine[] {
 }
 
 // ── The component ──────────────────────────────────────────────────
-export function MessageList({
+export const MessageList = React.memo(function MessageList({
   messages,
   theme,
   visibleHeight,
@@ -237,11 +240,35 @@ export function MessageList({
   const { stdout } = useStdout();
   const width = stdout?.columns || 80;
 
-  // 1) Pre-render every message into flat VLine[]
-  const allLines = useMemo(
-    () => messages.flatMap((msg) => messageToLines(msg, theme, width)),
-    [messages, theme, width]
-  );
+  // Incremental line cache — only recompute lines for messages whose reference changed
+  const lineCacheRef = useRef<Array<{ msgRef: ChatMessage; lines: VLine[] }>>([]);
+
+  // 1) Pre-render every message into flat VLine[], reusing cached lines
+  const allLines = useMemo(() => {
+    const cache = lineCacheRef.current;
+    const newCache: typeof cache = [];
+    const result: VLine[] = [];
+
+    for (let mi = 0; mi < messages.length; mi++) {
+      const msg = messages[mi];
+      let lines: VLine[];
+
+      if (mi < cache.length && cache[mi].msgRef === msg) {
+        // Same reference — reuse cached lines
+        lines = cache[mi].lines;
+      } else {
+        // Recompute and assign stable keys
+        const raw = messageToLines(msg, theme, width);
+        lines = raw.map((l, li) => ({ ...l, key: `${mi}-${li}` }));
+      }
+
+      newCache.push({ msgRef: msg, lines });
+      for (const l of lines) result.push(l);
+    }
+
+    lineCacheRef.current = newCache;
+    return result;
+  }, [messages, theme, width]);
 
   const total = allLines.length;
 
@@ -254,6 +281,10 @@ export function MessageList({
   const start = Math.max(0, end - visibleHeight);
   const visible = allLines.slice(start, end);
 
+  // Detect if model is in "thinking" state (streaming, no content yet)
+  const lastMsg = messages[messages.length - 1];
+  const isThinking = lastMsg?.isStreaming && !lastMsg.content;
+
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1}>
       {messages.length === 0 ? (
@@ -261,19 +292,22 @@ export function MessageList({
           <Text color={theme.dimText}>Start a conversation...</Text>
         </Box>
       ) : (
-        visible.map((line, i) => (
-          <Text
-            key={`${start + i}`}
-            color={line.color}
-            bold={line.bold}
-            italic={line.italic}
-            dimColor={line.dimmed}
-            wrap="truncate-end"
-          >
-            {line.text || " "}
-          </Text>
-        ))
+        <>
+          {visible.map((line) => (
+            <Text
+              key={line.key}
+              color={line.color}
+              bold={line.bold}
+              italic={line.italic}
+              dimColor={line.dimmed}
+              wrap="truncate-end"
+            >
+              {line.text || " "}
+            </Text>
+          ))}
+          {isThinking && <ThinkingIndicator theme={theme} />}
+        </>
       )}
     </Box>
   );
-}
+});

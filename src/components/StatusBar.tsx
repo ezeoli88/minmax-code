@@ -10,7 +10,7 @@ interface StatusBarProps {
   quota?: QuotaInfo | null;
 }
 
-export function StatusBar({ sessionName, totalTokens, theme, quota }: StatusBarProps) {
+export const StatusBar = React.memo(function StatusBar({ sessionName, totalTokens, theme, quota }: StatusBarProps) {
   const tokenStr = totalTokens > 1000 ? `${(totalTokens / 1000).toFixed(1)}k` : String(totalTokens);
 
   let quotaStr = "";
@@ -35,4 +35,4 @@ export function StatusBar({ sessionName, totalTokens, theme, quota }: StatusBarP
       </Text>
     </Box>
   );
-}
+});

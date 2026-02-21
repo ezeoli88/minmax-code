@@ -44,6 +44,9 @@ export function useChat({
   const abortRef = useRef<AbortController | null>(null);
   const historyRef = useRef<ChatCompletionMessageParam[]>([]);
   const messageCountRef = useRef(0);
+  const streamThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingStreamUpdateRef = useRef<{ raw: string; reasoning: string } | null>(null);
+  const pendingToolCallsRef = useRef<AccumulatedToolCall[] | null>(null);
 
   const getSystemPrompt = useCallback((): string => {
     let systemPrompt: string;
@@ -90,14 +93,16 @@ Be concise. Show relevant code, skip obvious explanations.`;
   }, [getSystemPrompt]);
 
   /**
-   * Update the last streaming message by re-parsing the raw buffer.
+   * Flush a pending streaming update — parse the raw buffer and update React state.
    */
-  const updateStreamingMessage = (rawBuffer: string, structuredReasoning: string) => {
+  const flushStreamUpdate = (rawBuffer: string, structuredReasoning: string) => {
     const parsed = parseModelOutput(rawBuffer);
-    // Merge structured reasoning (from reasoning_details) with parsed <think> reasoning
     const combinedReasoning = [structuredReasoning, parsed.reasoning]
       .filter(Boolean)
       .join("\n");
+
+    const pendingToolCalls = pendingToolCallsRef.current;
+    pendingToolCallsRef.current = null;
 
     setMessages((prev) => {
       const updated = [...prev];
@@ -107,22 +112,45 @@ Be concise. Show relevant code, skip obvious explanations.`;
           ...last,
           content: parsed.content,
           reasoning: combinedReasoning || undefined,
+          ...(pendingToolCalls ? { toolCalls: pendingToolCalls } : {}),
         };
       }
       return updated;
     });
   };
 
+  /**
+   * Throttled streaming update — batches rapid chunks into ~50ms intervals
+   * to avoid re-parsing + re-rendering on every single token.
+   */
+  const updateStreamingMessage = (rawBuffer: string, structuredReasoning: string) => {
+    pendingStreamUpdateRef.current = { raw: rawBuffer, reasoning: structuredReasoning };
+    if (streamThrottleRef.current) return; // already scheduled
+    streamThrottleRef.current = setTimeout(() => {
+      streamThrottleRef.current = null;
+      const pending = pendingStreamUpdateRef.current;
+      if (pending) {
+        pendingStreamUpdateRef.current = null;
+        flushStreamUpdate(pending.raw, pending.reasoning);
+      }
+    }, 50);
+  };
+
   const sendMessage = useCallback(
-    async (userInput: string) => {
+    async (userInput: string, fileContext?: string) => {
       if (isLoading) return;
 
       setIsLoading(true);
 
-      // Add user message
+      // Show only the user's text in the UI (not the file contents)
       const userMsg: ChatMessage = { role: "user", content: userInput };
       setMessages((prev) => [...prev, userMsg]);
-      historyRef.current.push({ role: "user", content: userInput });
+
+      // Send file context + user instruction to the API
+      const apiContent = fileContext
+        ? `${fileContext}\n\nUser request: ${userInput}`
+        : userInput;
+      historyRef.current.push({ role: "user", content: apiContent });
       onPersistMessage("user", userInput);
       messageCountRef.current++;
 
@@ -170,17 +198,31 @@ Be concise. Show relevant code, skip obvious explanations.`;
                 updateStreamingMessage(rawBuffer, structuredReasoning);
               },
               onToolCallDelta: (tcs) => {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last?.isStreaming) {
-                    updated[updated.length - 1] = {
-                      ...last,
-                      toolCalls: [...tcs],
-                    };
+                pendingToolCallsRef.current = [...tcs];
+                if (streamThrottleRef.current) return; // already scheduled
+                streamThrottleRef.current = setTimeout(() => {
+                  streamThrottleRef.current = null;
+                  const pending = pendingStreamUpdateRef.current;
+                  if (pending) {
+                    pendingStreamUpdateRef.current = null;
+                    flushStreamUpdate(pending.raw, pending.reasoning);
+                  } else if (pendingToolCallsRef.current) {
+                    // No content pending, but tool calls need flushing
+                    const toolCalls = pendingToolCallsRef.current;
+                    pendingToolCallsRef.current = null;
+                    setMessages((prev) => {
+                      const updated = [...prev];
+                      const last = updated[updated.length - 1];
+                      if (last?.isStreaming) {
+                        updated[updated.length - 1] = {
+                          ...last,
+                          toolCalls,
+                        };
+                      }
+                      return updated;
+                    });
                   }
-                  return updated;
-                });
+                }, 50);
               },
               onError: (err) => {
                 streamErrorMsg = err.message || String(err);
@@ -188,6 +230,14 @@ Be concise. Show relevant code, skip obvious explanations.`;
             },
             abort.signal
           );
+
+          // Cancel any pending throttled update — the final parse below supersedes it
+          if (streamThrottleRef.current) {
+            clearTimeout(streamThrottleRef.current);
+            streamThrottleRef.current = null;
+          }
+          pendingStreamUpdateRef.current = null;
+          pendingToolCallsRef.current = null;
 
           setTotalTokens((prev) => prev + (result.usage?.total_tokens || 0));
 
@@ -361,6 +411,12 @@ Be concise. Show relevant code, skip obvious explanations.`;
           return updated;
         });
       } finally {
+        if (streamThrottleRef.current) {
+          clearTimeout(streamThrottleRef.current);
+          streamThrottleRef.current = null;
+        }
+        pendingStreamUpdateRef.current = null;
+        pendingToolCallsRef.current = null;
         setIsLoading(false);
         abortRef.current = null;
       }
@@ -369,6 +425,11 @@ Be concise. Show relevant code, skip obvious explanations.`;
   );
 
   const cancelStream = useCallback(() => {
+    if (streamThrottleRef.current) {
+      clearTimeout(streamThrottleRef.current);
+      streamThrottleRef.current = null;
+    }
+    pendingToolCallsRef.current = null;
     abortRef.current?.abort();
   }, []);
 

@@ -9,7 +9,7 @@ interface HeaderProps {
   theme: Theme;
 }
 
-export function Header({ model, mode, theme }: HeaderProps) {
+export const Header = React.memo(function Header({ model, mode, theme }: HeaderProps) {
   const modeColor = mode === "PLAN" ? theme.planBadge : theme.builderBadge;
   const cwd = process.cwd().replace(/\\/g, "/");
   const parts = cwd.split("/");
@@ -38,4 +38,4 @@ export function Header({ model, mode, theme }: HeaderProps) {
       </Box>
     </Box>
   );
-}
+});

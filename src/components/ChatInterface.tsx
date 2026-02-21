@@ -1,14 +1,15 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import type OpenAI from "openai";
 import type { Theme } from "../config/themes.js";
 import { Header } from "./Header.js";
 import { MessageList } from "./MessageList.js";
-import { Input } from "./Input.js";
+import { Input, type InputHandle } from "./Input.js";
 import { StatusBar } from "./StatusBar.js";
 import { SessionPicker } from "./SessionPicker.js";
 import { ConfigMenu } from "./ConfigMenu.js";
 import { CommandPalette } from "./CommandPalette.js";
+import { FilePicker } from "./FilePicker.js";
 import type { PaletteResult } from "./CommandPalette.js";
 import { useMode } from "../hooks/useMode.js";
 import { useChat } from "../hooks/useChat.js";
@@ -19,6 +20,8 @@ import { handleCommand } from "../core/commands.js";
 import { MODEL_IDS } from "../core/api.js";
 import { themes } from "../config/themes.js";
 import { updateConfig, loadConfig } from "../config/settings.js";
+import { readFileSync, existsSync } from "fs";
+import { resolve } from "path";
 
 interface ChatInterfaceProps {
   client: OpenAI;
@@ -26,6 +29,47 @@ interface ChatInterfaceProps {
   initialTheme: string;
   onExit: () => void;
   onApiKeyChange: (key: string) => void;
+}
+
+/** Parse all @filepath references in the input text and read their contents. */
+function resolveFileReferences(
+  text: string,
+  cwd: string
+): { cleanText: string; fileContext: string } {
+  const atPattern = /@(\S+)/g;
+  const files: { path: string; content: string }[] = [];
+  let cleanText = text;
+
+  let match;
+  while ((match = atPattern.exec(text)) !== null) {
+    const filePath = match[1].replace(/\/$/, ""); // strip trailing slash
+    const absPath = resolve(cwd, filePath);
+
+    if (existsSync(absPath)) {
+      try {
+        const content = readFileSync(absPath, "utf-8");
+        // Truncate very large files
+        const truncated =
+          content.length > 50000
+            ? content.slice(0, 50000) + "\n... [truncated at 50KB]"
+            : content;
+        files.push({ path: filePath, content: truncated });
+      } catch {
+        // Skip files we can't read (dirs, binary, etc.)
+      }
+    }
+  }
+
+  if (files.length === 0) {
+    return { cleanText: text, fileContext: "" };
+  }
+
+  // Build file context block
+  const fileContext = files
+    .map((f) => `<file path="${f.path}">\n${f.content}\n</file>`)
+    .join("\n\n");
+
+  return { cleanText, fileContext };
 }
 
 export function ChatInterface({
@@ -40,8 +84,11 @@ export function ChatInterface({
   const [showSessionPicker, setShowSessionPicker] = useState(false);
   const [showConfigMenu, setShowConfigMenu] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showFilePicker, setShowFilePicker] = useState(false);
   const [scrollOffset, setScrollOffset] = useState(0);
   const [systemMessage, setSystemMessage] = useState<string | null>(null);
+  const [atQuery, setAtQuery] = useState<string | null>(null);
+  const inputRef = useRef<InputHandle>(null);
 
   const [apiKey] = useState(() => loadConfig().apiKey);
 
@@ -73,8 +120,23 @@ export function ChatInterface({
 
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
-  const paletteHeight = showCommandPalette ? 12 : 0; // title + 8 cmds + hint + 2 border
-  const visibleHeight = Math.max(3, termHeight - 8 - paletteHeight);
+  // FilePicker fixed height: header + ↑ indicator + maxVisible files + ↓ indicator + footer + 2 border
+  const filePickerMaxVisible = Math.min(10, Math.max(5, termHeight - 10));
+  const filePickerHeight = filePickerMaxVisible + 6;
+  const overlayHeight =
+    (showCommandPalette ? 12 : 0) + (showFilePicker ? filePickerHeight : 0);
+  const visibleHeight = Math.max(3, termHeight - 8 - overlayHeight);
+
+  const cwd = process.cwd();
+
+  // Auto-show/hide file picker based on @ query (set by Input's onAtQueryChange)
+  useEffect(() => {
+    if (atQuery !== null && !showFilePicker && !showCommandPalette) {
+      setShowFilePicker(true);
+    } else if (atQuery === null && showFilePicker) {
+      setShowFilePicker(false);
+    }
+  }, [atQuery, showFilePicker, showCommandPalette]);
 
   // Start session on mount
   useEffect(() => {
@@ -83,22 +145,40 @@ export function ChatInterface({
     }
   }, []);
 
-  // No auto-scroll on new messages. Scroll only resets when the user
-  // sends a new message (inside handleSubmit). This way Ctrl+U / ↑
-  // are never overridden by the agentic tool loop.
-
   // Token limit warning
   useEffect(() => {
     if (totalTokens > 180000 && totalTokens < 200000) {
-      setSystemMessage("Warning: Approaching token limit. Consider starting a new session with /new");
+      setSystemMessage(
+        "Warning: Approaching token limit. Consider starting a new session with /new"
+      );
     } else if (totalTokens >= 200000) {
       setSystemMessage("Token limit reached. Starting new session...");
       handleNewSession();
     }
   }, [totalTokens]);
 
+  // Throttled scroll — accumulate offset and flush at ~30fps
+  const scrollAccRef = useRef(0);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const SCROLL_THROTTLE = 32; // ~30fps
+
+  const applyScroll = useCallback((delta: number) => {
+    scrollAccRef.current += delta;
+    if (scrollTimerRef.current) return; // already scheduled
+    scrollTimerRef.current = setTimeout(() => {
+      scrollTimerRef.current = null;
+      const acc = scrollAccRef.current;
+      scrollAccRef.current = 0;
+      if (acc !== 0) {
+        setScrollOffset((prev) => Math.max(0, prev + acc));
+      }
+    }, SCROLL_THROTTLE);
+  }, []);
+
   useInput((input, key) => {
     if (showSessionPicker || showConfigMenu || showCommandPalette) return;
+    // When file picker is open, let it handle arrow keys and enter
+    if (showFilePicker) return;
 
     if (key.escape) {
       if (isLoading) {
@@ -113,29 +193,19 @@ export function ChatInterface({
     }
 
     // Scroll: Up/Down arrows (3 lines), Ctrl+U/Ctrl+D (half page)
-    if (key.upArrow) {
-      setScrollOffset((prev) => prev + 3);
-    }
-    if (key.downArrow) {
-      setScrollOffset((prev) => Math.max(0, prev - 3));
-    }
     const halfPage = Math.max(1, Math.floor(visibleHeight / 2));
-    if (input === "u" && key.ctrl) {
-      setScrollOffset((prev) => prev + halfPage);
-    }
-    if (input === "d" && key.ctrl) {
-      setScrollOffset((prev) => Math.max(0, prev - halfPage));
-    }
+    if (key.upArrow) applyScroll(3);
+    if (key.downArrow) applyScroll(-3);
+    if (input === "u" && key.ctrl) applyScroll(halfPage);
+    if (input === "d" && key.ctrl) applyScroll(-halfPage);
   });
 
   const handleMouseScroll = useCallback(
     (direction: "up" | "down") => {
       if (showSessionPicker || showConfigMenu || showCommandPalette) return;
-      setScrollOffset((prev) =>
-        direction === "up" ? prev + 3 : Math.max(0, prev - 3)
-      );
+      applyScroll(direction === "up" ? 3 : -3);
     },
-    [showSessionPicker, showConfigMenu, showCommandPalette]
+    [showSessionPicker, showConfigMenu, showCommandPalette, applyScroll]
   );
 
   useMouseScroll(handleMouseScroll);
@@ -146,8 +216,37 @@ export function ChatInterface({
     setSystemMessage(null);
   }, [clearMessages, startNewSession]);
 
+  const handleAtQueryChange = useCallback((query: string | null) => {
+    setAtQuery(query);
+  }, []);
+
+  const handleFileSelect = useCallback(
+    (filePath: string) => {
+      inputRef.current?.replaceAtQuery(filePath);
+      setShowFilePicker(false);
+    },
+    []
+  );
+
+  const handleFilePickerClose = useCallback(() => {
+    setShowFilePicker(false);
+  }, []);
+
+  const handleSlash = useCallback(() => {
+    setShowCommandPalette(true);
+  }, []);
+
+  const handlePaletteClose = useCallback(() => {
+    setShowCommandPalette(false);
+  }, []);
+
   const handleSubmit = useCallback(
     (input: string) => {
+      // Close file picker if open
+      if (showFilePicker) {
+        setShowFilePicker(false);
+      }
+
       // Check for commands
       if (input.startsWith("/")) {
         const result = handleCommand(input);
@@ -155,42 +254,53 @@ export function ChatInterface({
         switch (result.type) {
           case "new_session":
             handleNewSession();
+            inputRef.current?.clear();
             return;
           case "clear":
             clearMessages();
+            inputRef.current?.clear();
             return;
           case "exit":
             onExit();
             return;
           case "sessions":
             setShowSessionPicker(true);
+            inputRef.current?.clear();
             return;
           case "config":
             setShowConfigMenu(true);
+            inputRef.current?.clear();
             return;
           case "set_model":
             setModel(result.model);
             updateConfig({ model: result.model });
             setSystemMessage(`Model changed to ${result.model}`);
+            inputRef.current?.clear();
             return;
           case "set_theme":
             setThemeName(result.theme);
             updateConfig({ theme: result.theme });
             setSystemMessage(`Theme changed to ${result.theme}`);
+            inputRef.current?.clear();
             return;
           case "message":
             setSystemMessage(result.text);
+            inputRef.current?.clear();
             return;
           case "none":
             break;
         }
       }
 
+      // Resolve @file references
+      const { cleanText, fileContext } = resolveFileReferences(input, cwd);
+
       setSystemMessage(null);
-      setScrollOffset(0); // snap to bottom when user sends a new message
-      sendMessage(input);
+      setScrollOffset(0);
+      inputRef.current?.clear();
+      sendMessage(cleanText, fileContext || undefined);
     },
-    [sendMessage, clearMessages, handleNewSession, onExit]
+    [sendMessage, clearMessages, handleNewSession, onExit, cwd, showFilePicker]
   );
 
   const handlePaletteExecute = useCallback(
@@ -283,7 +393,17 @@ export function ChatInterface({
           currentTheme={themeName}
           currentModel={model}
           onExecute={handlePaletteExecute}
-          onClose={() => setShowCommandPalette(false)}
+          onClose={handlePaletteClose}
+        />
+      )}
+
+      {showFilePicker && (
+        <FilePicker
+          theme={theme}
+          query={atQuery || ""}
+          cwd={cwd}
+          onSelect={handleFileSelect}
+          onClose={handleFilePickerClose}
         />
       )}
 
@@ -294,11 +414,14 @@ export function ChatInterface({
       )}
 
       <Input
+        ref={inputRef}
         mode={mode}
         theme={theme}
         isLoading={isLoading}
         onSubmit={handleSubmit}
-        onSlash={() => setShowCommandPalette(true)}
+        onSlash={handleSlash}
+        onAtQueryChange={handleAtQueryChange}
+        suppressSubmit={showFilePicker}
       />
 
       <StatusBar
