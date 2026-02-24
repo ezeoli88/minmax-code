@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  BUN_VERSION: "1.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: bun-linux-x64
+            runner: ubuntu-latest
+            platform: linux-x64
+          - target: bun-linux-arm64
+            runner: ubuntu-latest
+            platform: linux-arm64
+          - target: bun-darwin-x64
+            runner: macos-13
+            platform: darwin-x64
+          - target: bun-darwin-arm64
+            runner: macos-14
+            platform: darwin-arm64
+          - target: bun-windows-x64
+            runner: windows-latest
+            platform: windows-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        shell: bash
+        run: |
+          mkdir -p dist/binaries
+
+          if [[ "${{ matrix.platform }}" == windows-* ]]; then
+            EXT=".exe"
+          else
+            EXT=""
+          fi
+
+          OUTFILE="dist/binaries/minmax-code-v${{ steps.version.outputs.VERSION }}-${{ matrix.platform }}${EXT}"
+
+          bun build src/index.ts \
+            --compile \
+            --target=${{ matrix.target }} \
+            --outfile "$OUTFILE"
+
+          echo "BINARY_PATH=${OUTFILE}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.platform }}
+          path: dist/binaries/*
+          retention-days: 1
+
+  upload-r2:
+    name: Upload to R2
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/binaries
+          merge-multiple: true
+
+      - name: List binaries
+        run: ls -lh dist/binaries/
+
+      - name: Upload to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+
+          for FILE in dist/binaries/*; do
+            FILENAME=$(basename "$FILE")
+            R2_KEY="releases/v${VERSION}/${FILENAME}"
+
+            echo "Uploading ${FILENAME} -> s3://${R2_BUCKET_NAME}/${R2_KEY}"
+            aws s3 cp "$FILE" "s3://${R2_BUCKET_NAME}/${R2_KEY}" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --no-progress
+          done
+
+          # Upload latest.json manifest
+          cat > /tmp/latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "binaries": {
+              "linux-x64": "releases/v${VERSION}/minmax-code-v${VERSION}-linux-x64",
+              "linux-arm64": "releases/v${VERSION}/minmax-code-v${VERSION}-linux-arm64",
+              "darwin-x64": "releases/v${VERSION}/minmax-code-v${VERSION}-darwin-x64",
+              "darwin-arm64": "releases/v${VERSION}/minmax-code-v${VERSION}-darwin-arm64",
+              "win32-x64": "releases/v${VERSION}/minmax-code-v${VERSION}-windows-x64.exe"
+            }
+          }
+          EOF
+
+          aws s3 cp /tmp/latest.json "s3://${R2_BUCKET_NAME}/releases/latest.json" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type "application/json" \
+            --no-progress
+
+  github-release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/binaries
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/binaries/*
+          generate_release_notes: true
+
+  publish-npm:
+    name: Publish to npm
+    needs: upload-r2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

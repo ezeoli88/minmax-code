@@ -1,11 +1,52 @@
 {
-  "name": "minmax-terminal",
+  "name": "minmax-code",
   "version": "0.1.0",
+  "description": "A terminal-native AI coding assistant powered by MiniMax",
   "type": "module",
+  "bin": {
+    "minmax-code": "./bin/minmax-code"
+  },
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
-    "build": "bun build src/index.ts --compile --outfile minmax"
+    "build": "bun build src/index.ts --compile --outfile minmax-code",
+    "build:all": "./scripts/build-all.sh",
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/postinstall.js",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "config": {
+    "cdnUrl": "https://cdn.minmax.com"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "coding-assistant",
+    "terminal",
+    "minimax",
+    "tui"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ezeoli88/minmax-tui"
   },
   "dependencies": {
     "ink": "^5.1.0",

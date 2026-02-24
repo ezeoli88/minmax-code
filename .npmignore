@@ -1,0 +1,12 @@
+src/
+dist/
+scripts/build-all.sh
+scripts/upload-r2.sh
+.github/
+.gitignore
+tsconfig.json
+bun.lock
+node_modules/
+agent.md
+arquitectura.md
+*.tgz

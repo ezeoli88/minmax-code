@@ -1,0 +1,40 @@
+#!/usr/bin/env node
+
+/**
+ * bin/minmax-code - Thin wrapper that finds and executes the pre-built binary.
+ * This file is the npm "bin" entry point.
+ */
+
+import { existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function getBinaryPath() {
+  const ext = process.platform === "win32" ? ".exe" : "";
+  return join(__dirname, `minmax-code${ext}`);
+}
+
+const binaryPath = getBinaryPath();
+
+if (!existsSync(binaryPath)) {
+  console.error("minmax-code: binary not found.");
+  console.error("Run `npm rebuild minmax-code` or reinstall the package.");
+  console.error("");
+  console.error(`Expected binary at: ${binaryPath}`);
+  process.exit(1);
+}
+
+try {
+  execFileSync(binaryPath, process.argv.slice(2), {
+    stdio: "inherit",
+    env: process.env,
+  });
+} catch (err) {
+  if (err.status != null) {
+    process.exit(err.status);
+  }
+  throw err;
+}
