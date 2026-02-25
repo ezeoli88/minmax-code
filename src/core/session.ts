@@ -22,7 +22,7 @@ export interface StoredMessage {
   created_at: string;
 }
 
-const DB_DIR = join(homedir(), ".minmax-terminal");
+const DB_DIR = join(homedir(), ".minmax-code");
 const DB_PATH = join(DB_DIR, "sessions.db");
 
 let db: Database | null = null;

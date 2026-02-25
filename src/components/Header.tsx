@@ -24,7 +24,7 @@ export const Header = React.memo(function Header({ model, mode, theme }: HeaderP
     >
       <Box>
         <Text bold color={theme.accent}>
-          minmax-terminal
+          minmax-code
         </Text>
         <Text color={theme.dimText}> | </Text>
         <Text color={theme.text}>{model}</Text>

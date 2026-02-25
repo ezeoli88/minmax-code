@@ -1,4 +1,5 @@
 import { existsSync } from "fs";
+import type { ToolResultMeta } from "../core/tool-meta.js";
 
 export const definition = {
   type: "function" as const,
@@ -31,7 +32,7 @@ export async function execute(args: {
   path: string;
   old_str: string;
   new_str: string;
-}): Promise<string> {
+}): Promise<string | { result: string; meta: ToolResultMeta }> {
   if (!existsSync(args.path)) {
     return `Error: File not found: ${args.path}`;
   }
@@ -49,5 +50,8 @@ export async function execute(args: {
 
   const newContent = content.replace(args.old_str, args.new_str);
   await Bun.write(args.path, newContent);
-  return `File edited successfully: ${args.path}`;
+  return {
+    result: `File edited successfully: ${args.path}`,
+    meta: { type: "edit_file", path: args.path, oldStr: args.old_str, newStr: args.new_str },
+  };
 }

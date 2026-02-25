@@ -1,2 +1,4 @@
 node_modules/
-minmax.exe
+dist/
+minmax-code
+minmax-code.exe

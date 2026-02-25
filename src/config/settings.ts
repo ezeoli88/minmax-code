@@ -13,7 +13,7 @@ export interface AppConfig {
   >;
 }
 
-const CONFIG_DIR = join(homedir(), ".minmax-terminal");
+const CONFIG_DIR = join(homedir(), ".minmax-code");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
 const DEFAULT_MODEL = "MiniMax-M2.5";

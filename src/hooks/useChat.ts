@@ -7,6 +7,7 @@ import { parseModelOutput, coerceArg, type ParsedToolCall } from "../core/parser
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import type { Mode } from "./useMode.js";
+import type { ToolResultMeta } from "../core/tool-meta.js";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
@@ -16,6 +17,7 @@ export interface ChatMessage {
   toolCallId?: string;
   name?: string;
   toolResults?: Map<string, { status: "running" | "done" | "error"; result?: string }>;
+  toolMeta?: ToolResultMeta;
   isStreaming?: boolean;
 }
 
@@ -30,6 +32,7 @@ interface UseChatOptions {
     toolCallId?: string | null,
     name?: string | null
   ) => void;
+  onQuotaRefresh?: () => void;
 }
 
 export function useChat({
@@ -37,6 +40,7 @@ export function useChat({
   model,
   mode,
   onPersistMessage,
+  onQuotaRefresh,
 }: UseChatOptions) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -55,7 +59,7 @@ export function useChat({
       systemPrompt = `You are a coding assistant in a terminal (READ-ONLY mode).
 Working directory: ${process.cwd()}
 
-Available tools: read_file, glob, grep, list_directory (read-only).
+Available tools: read_file, glob, grep, list_directory, web_search (read-only).
 You CANNOT write, edit, or run commands. Tell the user to switch to BUILDER mode (Tab) for modifications.
 Focus on: analysis, planning, explaining code, suggesting strategies.`;
     } else {
@@ -67,6 +71,7 @@ TOOL USAGE:
 - Use edit_file for modifications to existing files, write_file only for new files
 - Use glob/grep to find files before reading them
 - Use bash for git, npm, and other CLI operations
+- Use web_search for current information, docs, or answers not in local files
 - Execute one logical step at a time, verify results, then proceed
 
 Be concise. Show relevant code, skip obvious explanations.`;
@@ -330,54 +335,70 @@ Be concise. Show relevant code, skip obvious explanations.`;
           // Don't continue the loop if there was a stream error
           if (streamErrorMsg) break;
 
-          // Execute tool calls (structured or XML-parsed)
+          // Execute tool calls in parallel
           if (finalToolCalls.length > 0) {
-            for (const tc of finalToolCalls) {
-              let args: Record<string, any> = {};
+            // 1. Parse all args upfront
+            const parsedArgs = finalToolCalls.map((tc) => {
               try {
-                args = JSON.parse(tc.function.arguments || "{}");
+                return JSON.parse(tc.function.arguments || "{}");
               } catch {
-                args = {};
+                return {};
               }
+            });
 
-              const toolResultMsg: ChatMessage = {
-                role: "tool",
+            // 2. Add all tools as "running" in one batch
+            setMessages((prev) => [
+              ...prev,
+              ...finalToolCalls.map((tc) => ({
+                role: "tool" as const,
                 content: "",
                 toolCallId: tc.id,
                 name: tc.function.name,
                 toolResults: new Map([
                   [tc.id, { status: "running" as const }],
                 ]),
-              };
-              setMessages((prev) => [...prev, toolResultMsg]);
+              })),
+            ]);
 
-              let toolResult: string;
-              try {
-                toolResult = await executeTool(tc.function.name, args);
-              } catch (err: any) {
-                toolResult = `Error: ${err.message}`;
-              }
+            // 3. Execute all in parallel
+            const settled = await Promise.allSettled(
+              finalToolCalls.map((tc, i) =>
+                executeTool(tc.function.name, parsedArgs[i], mode)
+                  .then((r) => ({ result: r.result, meta: r.meta }))
+                  .catch((err: any) => ({ result: `Error: ${err.message}`, meta: undefined }))
+              )
+            );
 
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.toolCallId === tc.id
-                    ? {
-                        ...m,
-                        content: toolResult,
-                        toolResults: new Map([
-                          [tc.id, { status: "done" as const, result: toolResult }],
-                        ]),
-                      }
-                    : m
-                )
-              );
+            // 4. Update all results in one batch
+            const results = settled.map((s) =>
+              s.status === "fulfilled"
+                ? s.value
+                : { result: `Error: ${(s as PromiseRejectedResult).reason}`, meta: undefined }
+            );
 
+            setMessages((prev) =>
+              prev.map((m) => {
+                const idx = finalToolCalls.findIndex((tc) => tc.id === m.toolCallId);
+                if (idx === -1 || !m.toolResults?.get(m.toolCallId!)?.status) return m;
+                return {
+                  ...m,
+                  content: results[idx].result,
+                  toolMeta: results[idx].meta,
+                  toolResults: new Map([
+                    [m.toolCallId!, { status: "done" as const, result: results[idx].result }],
+                  ]),
+                };
+              })
+            );
+
+            // 5. Push all to history in order & persist
+            for (let i = 0; i < finalToolCalls.length; i++) {
               historyRef.current.push({
                 role: "tool" as const,
-                content: toolResult,
-                tool_call_id: tc.id,
+                content: results[i].result,
+                tool_call_id: finalToolCalls[i].id,
               });
-              onPersistMessage("tool", toolResult, null, tc.id, tc.function.name);
+              onPersistMessage("tool", results[i].result, null, finalToolCalls[i].id, finalToolCalls[i].function.name);
             }
 
             continueLoop = true;
@@ -419,9 +440,10 @@ Be concise. Show relevant code, skip obvious explanations.`;
         pendingToolCallsRef.current = null;
         setIsLoading(false);
         abortRef.current = null;
+        onQuotaRefresh?.();
       }
     },
-    [client, model, mode, isLoading, buildHistory, onPersistMessage]
+    [client, model, mode, isLoading, buildHistory, onPersistMessage, onQuotaRefresh]
   );
 
   const cancelStream = useCallback(() => {

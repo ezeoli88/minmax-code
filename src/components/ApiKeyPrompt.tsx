@@ -30,7 +30,7 @@ export function ApiKeyPrompt({ theme, onSubmit, errorMessage }: ApiKeyPromptProp
     <Box flexDirection="column" padding={2}>
       <Box marginBottom={1}>
         <Text bold color={theme.accent}>
-          minmax-terminal
+          minmax-code
         </Text>
       </Box>
       {errorMessage && (

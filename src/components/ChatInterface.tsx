@@ -3,7 +3,7 @@ import { Box, Text, useInput, useStdout } from "ink";
 import type OpenAI from "openai";
 import type { Theme } from "../config/themes.js";
 import { Header } from "./Header.js";
-import { MessageList } from "./MessageList.js";
+import { MessageList, type MessageListHandle } from "./MessageList.js";
 import { Input, type InputHandle } from "./Input.js";
 import { StatusBar } from "./StatusBar.js";
 import { SessionPicker } from "./SessionPicker.js";
@@ -85,10 +85,10 @@ export function ChatInterface({
   const [showConfigMenu, setShowConfigMenu] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showFilePicker, setShowFilePicker] = useState(false);
-  const [scrollOffset, setScrollOffset] = useState(0);
   const [systemMessage, setSystemMessage] = useState<string | null>(null);
   const [atQuery, setAtQuery] = useState<string | null>(null);
   const inputRef = useRef<InputHandle>(null);
+  const messageListRef = useRef<MessageListHandle>(null);
 
   const [apiKey] = useState(() => loadConfig().apiKey);
 
@@ -116,6 +116,7 @@ export function ChatInterface({
     model,
     mode,
     onPersistMessage: persistMessage,
+    onQuotaRefresh: refreshQuota,
   });
 
   const { stdout } = useStdout();
@@ -157,24 +158,6 @@ export function ChatInterface({
     }
   }, [totalTokens]);
 
-  // Throttled scroll — accumulate offset and flush at ~30fps
-  const scrollAccRef = useRef(0);
-  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const SCROLL_THROTTLE = 32; // ~30fps
-
-  const applyScroll = useCallback((delta: number) => {
-    scrollAccRef.current += delta;
-    if (scrollTimerRef.current) return; // already scheduled
-    scrollTimerRef.current = setTimeout(() => {
-      scrollTimerRef.current = null;
-      const acc = scrollAccRef.current;
-      scrollAccRef.current = 0;
-      if (acc !== 0) {
-        setScrollOffset((prev) => Math.max(0, prev + acc));
-      }
-    }, SCROLL_THROTTLE);
-  }, []);
-
   useInput((input, key) => {
     if (showSessionPicker || showConfigMenu || showCommandPalette) return;
     // When file picker is open, let it handle arrow keys and enter
@@ -194,18 +177,18 @@ export function ChatInterface({
 
     // Scroll: Up/Down arrows (3 lines), Ctrl+U/Ctrl+D (half page)
     const halfPage = Math.max(1, Math.floor(visibleHeight / 2));
-    if (key.upArrow) applyScroll(3);
-    if (key.downArrow) applyScroll(-3);
-    if (input === "u" && key.ctrl) applyScroll(halfPage);
-    if (input === "d" && key.ctrl) applyScroll(-halfPage);
+    if (key.upArrow) messageListRef.current?.applyScroll(3);
+    if (key.downArrow) messageListRef.current?.applyScroll(-3);
+    if (input === "u" && key.ctrl) messageListRef.current?.applyScroll(halfPage);
+    if (input === "d" && key.ctrl) messageListRef.current?.applyScroll(-halfPage);
   });
 
   const handleMouseScroll = useCallback(
     (direction: "up" | "down") => {
       if (showSessionPicker || showConfigMenu || showCommandPalette) return;
-      applyScroll(direction === "up" ? 3 : -3);
+      messageListRef.current?.applyScroll(direction === "up" ? 3 : -3);
     },
-    [showSessionPicker, showConfigMenu, showCommandPalette, applyScroll]
+    [showSessionPicker, showConfigMenu, showCommandPalette]
   );
 
   useMouseScroll(handleMouseScroll);
@@ -296,7 +279,7 @@ export function ChatInterface({
       const { cleanText, fileContext } = resolveFileReferences(input, cwd);
 
       setSystemMessage(null);
-      setScrollOffset(0);
+      messageListRef.current?.resetScroll();
       inputRef.current?.clear();
       sendMessage(cleanText, fileContext || undefined);
     },
@@ -329,7 +312,7 @@ export function ChatInterface({
     (s: any) => {
       const msgs = loadSession(s);
       loadMessages(msgs);
-      setScrollOffset(0);
+      messageListRef.current?.resetScroll();
       setShowSessionPicker(false);
     },
     [loadSession, loadMessages]
@@ -381,10 +364,10 @@ export function ChatInterface({
       <Header model={model} mode={mode} theme={theme} />
 
       <MessageList
+        ref={messageListRef}
         messages={messages}
         theme={theme}
         visibleHeight={visibleHeight}
-        scrollOffset={scrollOffset}
       />
 
       {showCommandPalette && (

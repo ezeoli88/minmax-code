@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: bun-linux-x64
+            os: linux
+            arch: x64
+            rg_pattern: x86_64-unknown-linux-musl
+            rg_ext: tar.gz
+            archive: tar.gz
+          - target: bun-linux-arm64
+            os: linux
+            arch: arm64
+            rg_pattern: aarch64-unknown-linux-gnu
+            rg_ext: tar.gz
+            archive: tar.gz
+          - target: bun-darwin-x64
+            os: darwin
+            arch: x64
+            rg_pattern: x86_64-apple-darwin
+            rg_ext: tar.gz
+            archive: tar.gz
+          - target: bun-darwin-arm64
+            os: darwin
+            arch: arm64
+            rg_pattern: aarch64-apple-darwin
+            rg_ext: tar.gz
+            archive: tar.gz
+          - target: bun-windows-x64
+            os: windows
+            arch: x64
+            rg_pattern: x86_64-pc-windows-msvc
+            rg_ext: zip
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install
+
+      - name: Compile standalone binary
+        run: |
+          mkdir -p staging
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            bun build src/index.ts --compile --target=${{ matrix.target }} --outfile staging/minmax-code.exe
+          else
+            bun build src/index.ts --compile --target=${{ matrix.target }} --outfile staging/minmax-code
+          fi
+
+      - name: Download ripgrep for target
+        run: |
+          RG_VERSION=$(curl -sL https://api.github.com/repos/BurntSushi/ripgrep/releases/latest | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": "//;s/".*//')
+          RG_ASSET="ripgrep-${RG_VERSION}-${{ matrix.rg_pattern }}.${{ matrix.rg_ext }}"
+          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ASSET}"
+          echo "Downloading ${RG_URL}"
+          curl -sL -o rg-archive "$RG_URL"
+
+          if [ "${{ matrix.rg_ext }}" = "tar.gz" ]; then
+            tar xzf rg-archive --wildcards '*/rg' --strip-components=1 || tar xzf rg-archive --wildcards '*/rg' 2>/dev/null
+            if [ -f rg ]; then
+              cp rg staging/rg
+            else
+              find . -name "rg" -not -path "./staging/*" -exec cp {} staging/rg \;
+            fi
+          else
+            unzip -o rg-archive '*/rg.exe' -d rg-tmp || true
+            find rg-tmp -name "rg.exe" -exec cp {} staging/rg.exe \;
+            rm -rf rg-tmp
+          fi
+
+      - name: Package archive
+        run: |
+          ARTIFACT="minmax-code-${{ matrix.os }}-${{ matrix.arch }}"
+          cd staging
+          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
+            tar czf "../${ARTIFACT}.tar.gz" *
+          else
+            zip "../${ARTIFACT}.zip" *
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minmax-code-${{ matrix.os }}-${{ matrix.arch }}
+          path: minmax-code-${{ matrix.os }}-${{ matrix.arch }}.${{ matrix.archive }}
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*

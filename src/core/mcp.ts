@@ -32,7 +32,7 @@ export async function initMCPServers(
       });
 
       const client = new Client(
-        { name: "minmax-terminal", version: "0.1.0" },
+        { name: "minmax-code", version: "0.1.0" },
         { capabilities: {} }
       );
 
