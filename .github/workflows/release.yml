@@ -52,7 +52,8 @@ jobs:
         with:
           bun-version: latest
 
-      - run: bun install
+      - run: bun install --ignore-scripts
+      - run: bun run node_modules/@vscode/ripgrep/lib/postinstall.js || true
 
       - name: Compile standalone binary
         run: |
