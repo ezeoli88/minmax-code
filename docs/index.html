@@ -125,6 +125,35 @@
       margin-top: 12px;
     }
 
+    .demos {
+      max-width: 800px;
+      width: 100%;
+      padding: 32px 20px 0;
+    }
+
+    .demo {
+      margin-bottom: 32px;
+    }
+
+    .demo-label {
+      font-size: 0.85rem;
+      color: #565f89;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      font-weight: 600;
+    }
+
+    .demo-label span {
+      color: #bb9af7;
+    }
+
+    .demo img {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid #292e42;
+    }
+
     .features {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -189,6 +218,17 @@
       <code id="commandText"></code>
     </div>
     <p class="detected" id="detected"></p>
+  </div>
+
+  <div class="demos">
+    <div class="demo">
+      <p class="demo-label"><span>PLAN</span> mode — read-only analysis</p>
+      <img src="cli-plan-mode.gif" alt="Plan mode demo" loading="lazy" />
+    </div>
+    <div class="demo">
+      <p class="demo-label"><span>BUILDER</span> mode — agentic execution</p>
+      <img src="cli-builder-mode.gif" alt="Builder mode demo" loading="lazy" />
+    </div>
   </div>
 
   <div class="features">
