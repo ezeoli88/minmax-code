@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "ezequiel/minmax-code"
+$Repo = "ezeoli88/minmax-code"
 $InstallDir = "$env:USERPROFILE\.minmax-code\bin"
 
 Write-Host ""

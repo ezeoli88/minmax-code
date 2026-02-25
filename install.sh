@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # minmax-code — Install Script (macOS / Linux)
-# Usage: curl -fsSL https://raw.githubusercontent.com/ezequiel/minmax-code/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.sh | bash
 
 set -e
 
-REPO="ezequiel/minmax-code"
+REPO="ezeoli88/minmax-code"
 INSTALL_DIR="$HOME/.minmax-code/bin"
 
 echo ""
