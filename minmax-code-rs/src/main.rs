@@ -1,8 +1,39 @@
 mod config;
 mod core;
 mod tools;
+mod tui;
 
-fn main() {
-    println!("minmax-code v0.1.0 — Phase 1 core engine ready");
-    println!("TUI will be implemented in Phase 2");
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(name = "minmax-code", version, about = "AI-powered terminal coding assistant")]
+struct Args {
+    /// Start in Plan mode instead of Builder mode
+    #[arg(long)]
+    plan: bool,
+
+    /// Override the model to use
+    #[arg(long, short = 'm')]
+    model: Option<String>,
+
+    /// Override the theme
+    #[arg(long)]
+    theme: Option<String>,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    let mut config = config::settings::load_config();
+
+    // Apply CLI overrides
+    if let Some(model) = args.model {
+        config.model = model;
+    }
+    if let Some(theme) = args.theme {
+        config.theme = theme;
+    }
+
+    // Launch TUI
+    tui::app::run(config).await
 }

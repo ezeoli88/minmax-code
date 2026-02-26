@@ -2,6 +2,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::config::settings::config_dir;
 
@@ -27,7 +28,7 @@ pub struct StoredMessage {
 }
 
 pub struct SessionStore {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl SessionStore {
@@ -68,14 +69,15 @@ impl SessionStore {
             );",
         )?;
 
-        Ok(Self { conn })
+        Ok(Self { conn: Mutex::new(conn) })
     }
 
     pub fn create_session(&self, model: &str) -> Result<Session> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock error: {}", e))?;
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono_now();
         let name = "New Session";
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO sessions (id, name, model, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, name, model, now, now],
         )?;
@@ -89,7 +91,8 @@ impl SessionStore {
     }
 
     pub fn rename_session(&self, id: &str, name: &str) -> Result<()> {
-        self.conn.execute(
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock error: {}", e))?;
+        conn.execute(
             "UPDATE sessions SET name = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![name, id],
         )?;
@@ -97,8 +100,8 @@ impl SessionStore {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
-        let mut stmt = self
-            .conn
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock error: {}", e))?;
+        let mut stmt = conn
             .prepare("SELECT id, name, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
         let sessions = stmt
             .query_map([], |row| {
@@ -115,8 +118,8 @@ impl SessionStore {
     }
 
     pub fn delete_session(&self, id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock error: {}", e))?;
+        conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -129,11 +132,12 @@ impl SessionStore {
         tool_call_id: Option<&str>,
         name: Option<&str>,
     ) -> Result<()> {
-        self.conn.execute(
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock error: {}", e))?;
+        conn.execute(
             "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![session_id, role, content, tool_calls, tool_call_id, name],
         )?;
-        self.conn.execute(
+        conn.execute(
             "UPDATE sessions SET updated_at = datetime('now') WHERE id = ?1",
             params![session_id],
         )?;
@@ -141,7 +145,8 @@ impl SessionStore {
     }
 
     pub fn get_session_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock error: {}", e))?;
+        let mut stmt = conn.prepare(
             "SELECT id, session_id, role, content, tool_calls, tool_call_id, name, created_at FROM messages WHERE session_id = ?1 ORDER BY id ASC",
         )?;
         let messages = stmt
@@ -199,7 +204,7 @@ mod tests {
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );"
         ).unwrap();
-        SessionStore { conn }
+        SessionStore { conn: Mutex::new(conn) }
     }
 
     #[test]
