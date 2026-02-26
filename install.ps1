@@ -1,52 +1,46 @@
-#!/usr/bin/env pwsh
-# minmax-code — Install Script (Windows)
-# Usage: irm https://raw.githubusercontent.com/ezequiel/minmax-code/main/install.ps1 | iex
+# minmax-code (Rust) — Install Script for Windows
+# Usage: irm https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "ezeoli88/minmax-code"
-$InstallDir = "$env:USERPROFILE\.minmax-code\bin"
+$REPO = "ezeoli88/minmax-code"
+$INSTALL_DIR = "$env:USERPROFILE\.minmax-code\bin"
+$ARCHIVE = "minmax-code-windows-x64.zip"
+$URL = "https://github.com/$REPO/releases/latest/download/$ARCHIVE"
 
 Write-Host ""
-Write-Host "  minmax-code Installer" -ForegroundColor Cyan
-Write-Host "  =====================" -ForegroundColor DarkGray
+Write-Host "  minmax-code Installer (Rust native binary)"
+Write-Host "  ============================================"
 Write-Host ""
+Write-Host "  Downloading $ARCHIVE..."
 
-# Detect architecture
-$Arch = "x64"
-if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
-    Write-Host "  ARM64 detected, but only x64 binaries are available." -ForegroundColor Yellow
-    Write-Host "  Attempting x64 (emulation)..." -ForegroundColor Yellow
-}
-
-$Archive = "minmax-code-windows-${Arch}.zip"
-$Url = "https://github.com/${Repo}/releases/latest/download/${Archive}"
-
-Write-Host "  Platform: windows-${Arch}" -ForegroundColor White
-Write-Host "  Downloading ${Archive}..." -ForegroundColor Yellow
+# Create install directory
+New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
 
 # Download
-$TempFile = Join-Path $env:TEMP $Archive
-Invoke-WebRequest -Uri $Url -OutFile $TempFile -UseBasicParsing
+$TMPDIR = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
+$TMPFILE = Join-Path $TMPDIR $ARCHIVE
+Invoke-WebRequest -Uri $URL -OutFile $TMPFILE
 
 # Extract
-if (!(Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-}
-Expand-Archive -Path $TempFile -DestinationPath $InstallDir -Force
-Remove-Item $TempFile -Force
+Expand-Archive -Path $TMPFILE -DestinationPath $INSTALL_DIR -Force
+Remove-Item -Recurse -Force $TMPDIR
 
-Write-Host "  Installed to ${InstallDir}" -ForegroundColor Green
+Write-Host "  Installed to $INSTALL_DIR"
 
 # Add to PATH
-$UserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-if ($UserPath -notlike "*\.minmax-code\bin*") {
-    [Environment]::SetEnvironmentVariable("PATH", "${InstallDir};${UserPath}", "User")
-    $env:PATH = "${InstallDir};${env:PATH}"
-    Write-Host "  Added to user PATH" -ForegroundColor Green
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*\.minmax-code\bin*") {
+    [Environment]::SetEnvironmentVariable("Path", "$INSTALL_DIR;$userPath", "User")
+    Write-Host "  Added to user PATH"
 }
 
 Write-Host ""
-Write-Host "  Done! Run 'minmax-code' to start." -ForegroundColor Green
-Write-Host "  (You may need to restart your terminal for PATH changes to take effect)" -ForegroundColor DarkGray
+Write-Host "  Done! Open a new terminal and run 'minmax-code' to start."
+Write-Host ""
+Write-Host "  Advantages of the Rust binary:"
+Write-Host "    - Single binary, no runtime dependencies"
+Write-Host "    - ripgrep search engine built-in"
+Write-Host "    - ~5-10MB binary size"
+Write-Host "    - Faster startup and lower memory usage"
 Write-Host ""

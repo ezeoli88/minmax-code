@@ -10,95 +10,70 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - target: bun-linux-x64
-            os: linux
-            arch: x64
-            rg_pattern: x86_64-unknown-linux-musl
-            rg_ext: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: minmax-code-linux-x64
             archive: tar.gz
-          - target: bun-linux-arm64
-            os: linux
-            arch: arm64
-            rg_pattern: aarch64-unknown-linux-gnu
-            rg_ext: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: minmax-code-linux-arm64
             archive: tar.gz
-          - target: bun-darwin-x64
-            os: darwin
-            arch: x64
-            rg_pattern: x86_64-apple-darwin
-            rg_ext: tar.gz
+            use_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: minmax-code-darwin-x64
             archive: tar.gz
-          - target: bun-darwin-arm64
-            os: darwin
-            arch: arm64
-            rg_pattern: aarch64-apple-darwin
-            rg_ext: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: minmax-code-darwin-arm64
             archive: tar.gz
-          - target: bun-windows-x64
-            os: windows
-            arch: x64
-            rg_pattern: x86_64-pc-windows-msvc
-            rg_ext: zip
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: minmax-code-windows-x64
             archive: zip
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          bun-version: latest
+          targets: ${{ matrix.target }}
 
-      - run: bun install --ignore-scripts
-      - run: bun run node_modules/@vscode/ripgrep/lib/postinstall.js || true
+      - name: Install cross (Linux ARM64)
+        if: ${{ matrix.use_cross }}
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Compile standalone binary
+      - name: Build (native)
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: ${{ matrix.use_cross }}
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
         run: |
           mkdir -p staging
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            bun build src/index.ts --compile --target=${{ matrix.target }} --outfile staging/minmax-code.exe
-          else
-            bun build src/index.ts --compile --target=${{ matrix.target }} --outfile staging/minmax-code
-          fi
+          cp target/${{ matrix.target }}/release/minmax-code staging/
+          tar czf ${{ matrix.artifact }}.tar.gz -C staging .
 
-      - name: Download ripgrep for target
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
         run: |
-          RG_VERSION=$(curl -sL https://api.github.com/repos/BurntSushi/ripgrep/releases/latest | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": "//;s/".*//')
-          RG_ASSET="ripgrep-${RG_VERSION}-${{ matrix.rg_pattern }}.${{ matrix.rg_ext }}"
-          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ASSET}"
-          echo "Downloading ${RG_URL}"
-          curl -sL -o rg-archive "$RG_URL"
-
-          if [ "${{ matrix.rg_ext }}" = "tar.gz" ]; then
-            tar xzf rg-archive --wildcards '*/rg' --strip-components=1 || tar xzf rg-archive --wildcards '*/rg' 2>/dev/null
-            if [ -f rg ]; then
-              cp rg staging/rg
-            else
-              find . -name "rg" -not -path "./staging/*" -exec cp {} staging/rg \;
-            fi
-          else
-            unzip -o rg-archive '*/rg.exe' -d rg-tmp || true
-            find rg-tmp -name "rg.exe" -exec cp {} staging/rg.exe \;
-            rm -rf rg-tmp
-          fi
-
-      - name: Package archive
-        run: |
-          ARTIFACT="minmax-code-${{ matrix.os }}-${{ matrix.arch }}"
-          cd staging
-          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar czf "../${ARTIFACT}.tar.gz" *
-          else
-            zip "../${ARTIFACT}.zip" *
-          fi
+          mkdir staging
+          copy target\${{ matrix.target }}\release\minmax-code.exe staging\
+          Compress-Archive -Path staging\* -DestinationPath ${{ matrix.artifact }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: minmax-code-${{ matrix.os }}-${{ matrix.arch }}
-          path: minmax-code-${{ matrix.os }}-${{ matrix.arch }}.${{ matrix.archive }}
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.${{ matrix.archive }}
 
   release:
     runs-on: ubuntu-latest
