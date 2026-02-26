@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::settings::{save_config, AppConfig};
 use crate::core::api::{AccumulatedToolCall, MiniMaxClient, QuotaInfo};
-use crate::core::chat::{ChatEngine, ChatEvent, ResponseChannel};
+use crate::core::chat::{ChatEngine, ChatEvent, ResponseChannel, TodoItem};
 use crate::core::commands::{handle_command, CommandResult};
 use crate::core::mcp::McpManager;
 use crate::core::session::SessionStore;
@@ -110,6 +110,7 @@ pub struct App {
     pub config_menu_state: ConfigMenuState,
     pub api_key_state: ApiKeyPromptState,
     pub agent_question_state: Option<AgentQuestionState>,
+    pub todo_items: Vec<TodoItem>,
 
     // Internal
     agent_question_tx: Option<ResponseChannel>,
@@ -158,6 +159,7 @@ impl App {
             config_menu_state: ConfigMenuState::new(),
             api_key_state: ApiKeyPromptState::new(),
             agent_question_state: None,
+            todo_items: Vec::new(),
             agent_question_tx: None,
             engine: None,
             session_store: None,
@@ -921,6 +923,9 @@ impl App {
             ChatEvent::Error(msg) => {
                 self.set_system_message(msg);
             }
+            ChatEvent::TodoUpdate(items) => {
+                self.todo_items = items;
+            }
             ChatEvent::AskUser {
                 question,
                 response_tx,
@@ -997,6 +1002,7 @@ impl App {
 
     fn new_session(&mut self) {
         self.messages.clear();
+        self.todo_items.clear();
         self.total_tokens = 0;
         self.prompt_tokens = 0;
         self.completion_tokens = 0;

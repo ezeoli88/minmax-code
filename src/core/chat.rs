@@ -31,6 +31,23 @@ impl std::fmt::Debug for ResponseChannel {
     }
 }
 
+// ── Todo types ───────────────────────────────────────────────────────────
+
+/// Status of a todo item.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// A single todo item in the task list.
+#[derive(Debug, Clone)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
 // ── Chat Events (for UI consumption) ────────────────────────────────────
 
 /// Events emitted by the ChatEngine for UI updates.
@@ -67,6 +84,8 @@ pub enum ChatEvent {
         question: AgentQuestion,
         response_tx: ResponseChannel,
     },
+    /// The agent updated the todo/task list.
+    TodoUpdate(Vec<TodoItem>),
 }
 
 /// The final assistant message after streaming completes.
@@ -164,10 +183,11 @@ impl ChatEngine {
             Mode::Plan => format!(
                 "You are a coding assistant in a terminal (READ-ONLY mode).\n\
                 Working directory: {}\n\n\
-                Available tools: read_file, glob, grep, list_directory, web_search (read-only), ask_user.\n\
+                Available tools: read_file, glob, grep, list_directory, web_search (read-only), ask_user, todo_write.\n\
                 You CANNOT write, edit, or run commands. Tell the user to switch to BUILDER mode (Tab) for modifications.\n\
                 Focus on: analysis, planning, explaining code, suggesting strategies.\n\
-                Use ask_user to ask the user clarifying questions when you need more information to proceed.",
+                Use ask_user to ask the user clarifying questions when you need more information to proceed.\n\
+                Use todo_write to create a task list when you have a plan ready, tracking progress on multi-step work.",
                 cwd
             ),
             Mode::Builder => format!(
@@ -180,6 +200,7 @@ impl ChatEngine {
                 - Use bash for git, npm, and other CLI operations\n\
                 - Use web_search for current information, docs, or answers not in local files\n\
                 - Use ask_user when you need user clarification, confirmation, or to let the user choose between alternatives\n\
+                - Use todo_write to create and update a task list when working on multi-step tasks\n\
                 - Execute one logical step at a time, verify results, then proceed\n\n\
                 Be concise. Show relevant code, skip obvious explanations.",
                 cwd
@@ -431,11 +452,66 @@ impl ChatEngine {
                 let mut results: Vec<Option<(String, String, tools::ToolExecutionResult)>> =
                     (0..tool_count).map(|_| None).collect();
 
-                // Separate ask_user calls (handled synchronously) from regular tools
+                // Separate intercepted tools (ask_user, todo_write) from regular tools
                 let mut regular_indices: Vec<usize> = Vec::new();
 
                 for (i, tc) in final_tool_calls.iter().enumerate() {
-                    if tc.function.name == "ask_user" {
+                    if tc.function.name == "todo_write" {
+                        // Handle todo_write: parse items and send update to UI
+                        let args = &parsed_args[i];
+                        let items: Vec<TodoItem> = args
+                            .get("todos")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|item| {
+                                        let content = item.get("content")?.as_str()?.to_string();
+                                        let status = match item
+                                            .get("status")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("pending")
+                                        {
+                                            "in_progress" => TodoStatus::InProgress,
+                                            "completed" => TodoStatus::Completed,
+                                            _ => TodoStatus::Pending,
+                                        };
+                                        Some(TodoItem { content, status })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let item_count = items.len();
+                        let completed = items
+                            .iter()
+                            .filter(|t| t.status == TodoStatus::Completed)
+                            .count();
+
+                        let _ = event_tx.send(ChatEvent::ToolExecutionStart {
+                            id: tc.id.clone(),
+                            name: "todo_write".to_string(),
+                        });
+
+                        // Send the todo update to the UI
+                        let _ = event_tx.send(ChatEvent::TodoUpdate(items));
+
+                        let result_msg = format!(
+                            "Todo list updated ({}/{} completed)",
+                            completed, item_count
+                        );
+
+                        let _ = event_tx.send(ChatEvent::ToolExecutionDone {
+                            id: tc.id.clone(),
+                            name: "todo_write".to_string(),
+                            result: result_msg.clone(),
+                        });
+
+                        results[i] = Some((
+                            tc.id.clone(),
+                            tc.function.name.clone(),
+                            tools::ToolExecutionResult::text(result_msg),
+                        ));
+                    } else if tc.function.name == "ask_user" {
                         // Handle ask_user synchronously
                         let args = &parsed_args[i];
                         let question_text = args

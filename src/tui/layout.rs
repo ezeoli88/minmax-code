@@ -12,6 +12,7 @@ use crate::tui::file_picker;
 use crate::tui::header;
 use crate::tui::input;
 use crate::tui::status_bar;
+use crate::tui::todo_panel;
 
 /// Main draw function that renders the entire layout.
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -41,35 +42,63 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_chat_screen(frame: &mut Frame, app: &App, theme: &crate::config::themes::Theme) {
     let area = frame.area();
 
-    // Layout: Header(3) | Chat(flex) | SystemMsg?(1) | Input(3) | StatusBar(1)
+    // Layout: Header(3) | TodoPanel?(N) | Chat(flex) | SystemMsg?(1) | Input(3) | StatusBar(1)
     let has_system_msg = app.system_message.is_some();
-    let constraints = if has_system_msg {
-        vec![
-            Constraint::Length(3),  // Header
-            Constraint::Min(3),    // Chat area
-            Constraint::Length(1), // System message
-            Constraint::Length(3), // Input
-            Constraint::Length(1), // Status bar
-        ]
+    let has_todos = !app.todo_items.is_empty();
+    let todo_height = if has_todos {
+        todo_panel::panel_height(app.todo_items.len())
     } else {
-        vec![
-            Constraint::Length(3),  // Header
-            Constraint::Min(3),    // Chat area
-            Constraint::Length(3), // Input
-            Constraint::Length(1), // Status bar
-        ]
+        0
     };
+
+    let mut constraints = vec![Constraint::Length(3)]; // Header
+    if has_todos {
+        constraints.push(Constraint::Length(todo_height)); // Todo panel
+    }
+    constraints.push(Constraint::Min(3)); // Chat area
+    if has_system_msg {
+        constraints.push(Constraint::Length(1)); // System message
+    }
+    constraints.push(Constraint::Length(3)); // Input
+    constraints.push(Constraint::Length(1)); // Status bar
 
     let chunks = Layout::vertical(constraints).split(area);
 
-    let (header_area, chat_area, system_area, input_area, status_area) = if has_system_msg {
-        (chunks[0], chunks[1], Some(chunks[2]), chunks[3], chunks[4])
+    // Assign areas based on which optional sections are present
+    let mut idx = 0;
+    let header_area = chunks[idx];
+    idx += 1;
+
+    let todo_area = if has_todos {
+        let a = chunks[idx];
+        idx += 1;
+        Some(a)
     } else {
-        (chunks[0], chunks[1], None, chunks[2], chunks[3])
+        None
     };
+
+    let chat_area = chunks[idx];
+    idx += 1;
+
+    let system_area = if has_system_msg {
+        let a = chunks[idx];
+        idx += 1;
+        Some(a)
+    } else {
+        None
+    };
+
+    let input_area = chunks[idx];
+    idx += 1;
+    let status_area = chunks[idx];
 
     // Draw header
     header::render(frame, header_area, app, theme);
+
+    // Draw todo panel if present
+    if let Some(area) = todo_area {
+        todo_panel::render(frame, area, &app.todo_items, theme);
+    }
 
     // Draw chat messages
     chat_view::render(frame, chat_area, app, theme);
