@@ -296,19 +296,25 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     let mut current_line = String::new();
 
     for word in text.split_whitespace() {
+        let word_chars = word.chars().count();
+        let line_chars = current_line.chars().count();
         if current_line.is_empty() {
-            if word.len() > max_width {
-                // Break long word
-                let mut remaining = word;
-                while remaining.len() > max_width {
-                    lines.push(remaining[..max_width].to_string());
-                    remaining = &remaining[max_width..];
+            if word_chars > max_width {
+                // Break long word at char boundaries
+                let mut chars = word.chars();
+                let mut chunk = String::new();
+                while let Some(c) = chars.next() {
+                    chunk.push(c);
+                    if chunk.chars().count() >= max_width {
+                        lines.push(chunk);
+                        chunk = String::new();
+                    }
                 }
-                current_line = remaining.to_string();
+                current_line = chunk;
             } else {
                 current_line = word.to_string();
             }
-        } else if current_line.len() + 1 + word.len() > max_width {
+        } else if line_chars + 1 + word_chars > max_width {
             lines.push(current_line);
             current_line = word.to_string();
         } else {

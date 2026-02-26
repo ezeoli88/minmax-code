@@ -11,31 +11,6 @@ This is a terminal-based chat application that combines:
 - **Session Management**: Persistent chat sessions stored in SQLite
 - **Themed UI**: Multiple terminal color themes
 
-## Tech Stack
-
-- **Runtime**: Bun
-- **UI Framework**: Ink (React for terminal)
-- **LLM Provider**: MiniMax API
-- **Database**: SQLite (via better-sqlite3)
-- **MCP**: @modelcontextprotocol/sdk
-- **Language**: TypeScript
-
-## Development
-
-```bash
-# Install dependencies
-bun install
-
-# Run in development mode
-bun dev
-
-# Build
-bun build
-
-# Start
-bun start
-```
-
 ## Output Parsing
 
 The AI output is parsed to extract:

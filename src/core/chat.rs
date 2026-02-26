@@ -177,14 +177,17 @@ impl ChatEngine {
 
     /// Send a user message and run the agentic loop.
     /// Emits ChatEvents to the provided sender for UI updates.
+    /// Set an external cancel token (from the UI) so Esc can interrupt the agentic loop.
+    pub fn set_cancel_token(&mut self, token: CancellationToken) {
+        self.cancel_token = token;
+    }
+
     pub async fn send_message(
         &mut self,
         user_input: &str,
         file_context: Option<&str>,
         event_tx: mpsc::UnboundedSender<ChatEvent>,
     ) -> Result<()> {
-        // Reset cancel token for this message
-        self.cancel_token = CancellationToken::new();
 
         // Build API content with file context if present
         let api_content = match file_context {
@@ -364,6 +367,10 @@ impl ChatEngine {
 
             // Execute tool calls if any
             if !final_tool_calls.is_empty() {
+                if self.cancel_token.is_cancelled() {
+                    break;
+                }
+
                 // Parse all args upfront
                 let parsed_args: Vec<Value> = final_tool_calls
                     .iter()
@@ -373,7 +380,7 @@ impl ChatEngine {
                     })
                     .collect();
 
-                // Execute tools in parallel
+                // Execute tools in parallel, emitting events as each completes
                 let mut handles = Vec::new();
                 for (i, tc) in final_tool_calls.iter().enumerate() {
                     let _ = event_tx.send(ChatEvent::ToolExecutionStart {
@@ -382,13 +389,25 @@ impl ChatEngine {
                     });
 
                     let name = tc.function.name.clone();
+                    let id = tc.id.clone();
                     let args = parsed_args[i].clone();
                     let mode = self.mode;
                     let mcp = self.mcp_manager.clone();
+                    let tx = event_tx.clone();
+                    let cancel = self.cancel_token.clone();
 
                     handles.push(tokio::spawn(async move {
+                        if cancel.is_cancelled() {
+                            let result = tools::ToolExecutionResult::text("Cancelled".to_string());
+                            let _ = tx.send(ChatEvent::ToolExecutionDone {
+                                id: id.clone(),
+                                name: name.clone(),
+                                result: result.result.clone(),
+                            });
+                            return (id, name, result);
+                        }
                         // Route MCP tools to the MCP manager
-                        if name.starts_with("mcp__") {
+                        let result = if name.starts_with("mcp__") {
                             if let Some(mcp) = mcp {
                                 let manager = mcp.lock().await;
                                 match manager.call_tool(&name, args).await {
@@ -404,43 +423,57 @@ impl ChatEngine {
                             }
                         } else {
                             tools::execute_tool(&name, args, mode).await
-                        }
+                        };
+
+                        // Emit done event immediately when this tool finishes
+                        let _ = tx.send(ChatEvent::ToolExecutionDone {
+                            id: id.clone(),
+                            name: name.clone(),
+                            result: result.result.clone(),
+                        });
+
+                        (id, name, result)
                     }));
                 }
 
-                // Collect results
+                // Collect results (order preserved for history)
                 let mut results = Vec::new();
                 for handle in handles {
-                    let result = match handle.await {
+                    let (id, name, result) = match handle.await {
                         Ok(r) => r,
-                        Err(e) => tools::ToolExecutionResult::text(format!("Error: {}", e)),
+                        Err(e) => {
+                            let err_result = tools::ToolExecutionResult::text(format!("Error: {}", e));
+                            (String::new(), String::new(), err_result)
+                        }
                     };
-                    results.push(result);
+                    results.push((id, name, result));
                 }
 
-                // Update history and emit events for each tool result
-                for (i, tc) in final_tool_calls.iter().enumerate() {
-                    let result = &results[i];
-
-                    let _ = event_tx.send(ChatEvent::ToolExecutionDone {
-                        id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        result: result.result.clone(),
-                    });
-
+                // Update history for each tool result
+                for (id, _name, result) in &results {
                     self.history.push(serde_json::json!({
                         "role": "tool",
                         "content": result.result,
-                        "tool_call_id": tc.id
+                        "tool_call_id": id
                     }));
+                }
 
-                    self.persist_message(
-                        "tool",
-                        &result.result,
-                        None,
-                        Some(&tc.id),
-                        Some(&tc.function.name),
-                    );
+                // Persist all tool messages
+                for (i, tc) in final_tool_calls.iter().enumerate() {
+                    if let Some((_, _, result)) = results.get(i) {
+                        self.persist_message(
+                            "tool",
+                            &result.result,
+                            None,
+                            Some(&tc.id),
+                            Some(&tc.function.name),
+                        );
+                    }
+                }
+
+                // Check cancel after tools complete
+                if self.cancel_token.is_cancelled() {
+                    break;
                 }
 
                 // Continue the loop — model will process tool results

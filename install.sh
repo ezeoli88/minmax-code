@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# minmax-code — Install Script (macOS / Linux)
+# minmax-code (Rust) — Install Script (macOS / Linux)
 # Usage: curl -fsSL https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.sh | bash
 
 set -e
@@ -8,8 +8,8 @@ REPO="ezeoli88/minmax-code"
 INSTALL_DIR="$HOME/.minmax-code/bin"
 
 echo ""
-echo "  minmax-code Installer"
-echo "  ====================="
+echo "  minmax-code Installer (Rust native binary)"
+echo "  ============================================"
 echo ""
 
 # Detect OS
@@ -47,7 +47,6 @@ curl -fSL -o "${TMPDIR}/${ARCHIVE}" "$URL"
 mkdir -p "$INSTALL_DIR"
 tar xzf "${TMPDIR}/${ARCHIVE}" -C "$INSTALL_DIR"
 chmod +x "$INSTALL_DIR/minmax-code"
-chmod +x "$INSTALL_DIR/rg" 2>/dev/null || true
 rm -rf "$TMPDIR"
 
 echo "  Installed to ${INSTALL_DIR}"
@@ -73,5 +72,12 @@ fi
 
 echo ""
 echo "  Done! Run 'minmax-code' to start."
+echo ""
+echo "  Advantages of the Rust binary:"
+echo "    - Single binary, no runtime dependencies"
+echo "    - ripgrep search engine built-in (no separate rg binary needed)"
+echo "    - ~5-10MB binary size (vs ~60MB for TypeScript version)"
+echo "    - Faster startup and lower memory usage"
+echo ""
 echo "  (You may need to restart your shell or run: export PATH=\"\$HOME/.minmax-code/bin:\$PATH\")"
 echo ""

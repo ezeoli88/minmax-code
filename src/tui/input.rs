@@ -54,9 +54,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let content = Paragraph::new(Line::from(spans)).block(block);
     frame.render_widget(content, area);
 
-    // Position cursor
+    // Position cursor (count chars up to byte offset for display column)
     if !app.is_streaming {
-        let cursor_x = area.x + 1 + prompt.len() as u16 + app.input_cursor as u16;
+        let char_pos = app.input_text[..app.input_cursor].chars().count();
+        let cursor_x = area.x + 1 + prompt.len() as u16 + char_pos as u16;
         let cursor_y = area.y + 1;
         frame.set_cursor_position(Position::new(cursor_x, cursor_y));
     }

@@ -60,10 +60,12 @@ pub fn render_tool_result_lines<'a>(msg: &DisplayMessage, theme: &Theme, width: 
         let preview_lines: Vec<&str> = msg.content.lines().take(max_preview_lines).collect();
 
         for line in &preview_lines {
-            let truncated = if line.len() > content_width {
-                format!("{}…", &line[..content_width.saturating_sub(1)])
+            // Strip ANSI escape codes and replace tabs with spaces
+            let clean = strip_ansi_and_tabs(line);
+            let truncated = if clean.chars().count() > content_width {
+                truncate_chars(&clean, content_width.saturating_sub(1))
             } else {
-                line.to_string()
+                clean
             };
             lines.push(TuiLine::from(vec![
                 Span::raw("    "),
@@ -86,6 +88,45 @@ pub fn render_tool_result_lines<'a>(msg: &DisplayMessage, theme: &Theme, width: 
     lines
 }
 
+/// Strip ANSI escape sequences and replace tabs with spaces.
+fn strip_ansi_and_tabs(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // Skip ANSI escape: ESC [ ... final_byte
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if c.is_ascii_alphabetic() || c == '~' {
+                        break;
+                    }
+                }
+            }
+        } else if ch == '\t' {
+            result.push_str("    ");
+        } else if ch == '\r' {
+            // skip carriage returns
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Truncate a string to at most `max_chars` characters, appending `…` if truncated.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut end = 0;
+    for (i, (idx, _)) in s.char_indices().enumerate() {
+        if i >= max_chars {
+            return format!("{}…", &s[..end]);
+        }
+        end = idx + s[idx..].chars().next().map_or(0, |c| c.len_utf8());
+    }
+    s.to_string()
+}
+
 /// Abbreviate JSON arguments for display.
 fn abbreviate_args(args_json: &str, max_len: usize) -> String {
     // Try to parse and show key-value pairs
@@ -96,16 +137,16 @@ fn abbreviate_args(args_json: &str, max_len: usize) -> String {
                 .map(|(k, v)| {
                     let v_str = match v {
                         serde_json::Value::String(s) => {
-                            if s.len() > 30 {
-                                format!("\"{}…\"", &s[..27])
+                            if s.chars().count() > 30 {
+                                format!("\"{}\"", truncate_chars(s, 27))
                             } else {
                                 format!("\"{}\"", s)
                             }
                         }
                         _ => {
                             let s = v.to_string();
-                            if s.len() > 30 {
-                                format!("{}…", &s[..27])
+                            if s.chars().count() > 30 {
+                                truncate_chars(&s, 27)
                             } else {
                                 s
                             }
@@ -115,17 +156,17 @@ fn abbreviate_args(args_json: &str, max_len: usize) -> String {
                 })
                 .collect();
             let result = pairs.join(", ");
-            if result.len() > max_len {
-                return format!("{}…", &result[..max_len.saturating_sub(1)]);
+            if result.chars().count() > max_len {
+                return truncate_chars(&result, max_len.saturating_sub(1));
             }
             return result;
         }
     }
 
-    if args_json.len() <= max_len {
+    if args_json.chars().count() <= max_len {
         return args_json.to_string();
     }
-    format!("{}…", &args_json[..max_len.saturating_sub(1)])
+    truncate_chars(args_json, max_len.saturating_sub(1))
 }
 
 #[cfg(test)]

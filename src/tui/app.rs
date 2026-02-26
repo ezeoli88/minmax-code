@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,6 +88,7 @@ pub struct App {
     pub system_message: Option<String>,
     pub is_streaming: bool,
     pub should_quit: bool,
+    pub tick: u64,
 
     // Overlay states
     pub palette_state: CommandPaletteState,
@@ -101,6 +102,7 @@ pub struct App {
     session_id: Option<String>,
     chat_event_rx: Option<mpsc::UnboundedReceiver<ChatEvent>>,
     engine_return_rx: Option<oneshot::Receiver<ChatEngine>>,
+    quota_refresh_rx: Option<oneshot::Receiver<QuotaInfo>>,
     cancel_token: CancellationToken,
     #[allow(dead_code)]
     mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
@@ -129,6 +131,7 @@ impl App {
             system_message: None,
             is_streaming: false,
             should_quit: false,
+            tick: 0,
             palette_state: CommandPaletteState::new(),
             file_picker_state: FilePickerState::new(),
             config_menu_state: ConfigMenuState::new(),
@@ -138,6 +141,7 @@ impl App {
             session_id: None,
             chat_event_rx: None,
             engine_return_rx: None,
+            quota_refresh_rx: None,
             cancel_token: CancellationToken::new(),
             mcp_manager: None,
             config,
@@ -164,6 +168,9 @@ impl App {
 
     pub async fn init_engine(&mut self) -> Result<()> {
         let client = MiniMaxClient::new(&self.config.api_key);
+        if let Ok(quota) = client.fetch_quota().await {
+            self.quota = Some(quota);
+        }
         let mut engine = ChatEngine::new(client, &self.config.model, self.mode);
 
         // Initialize session store
@@ -212,6 +219,11 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        // Only handle key press events — ignore Release/Repeat to avoid duplicates on Windows
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+
         // Global: Ctrl+C to quit
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if self.is_streaming {
@@ -345,7 +357,7 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.input_text.insert(self.input_cursor, c);
-                self.input_cursor += 1;
+                self.input_cursor += c.len_utf8();
 
                 // Check for '/' at start of input → open command palette
                 if self.input_text == "/" {
@@ -364,8 +376,14 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                    self.input_text.remove(self.input_cursor);
+                    // Find the previous char boundary
+                    let prev = self.input_text[..self.input_cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.input_text.remove(prev);
+                    self.input_cursor = prev;
                 }
             }
             KeyCode::Delete => {
@@ -375,12 +393,22 @@ impl App {
             }
             KeyCode::Left => {
                 if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
+                    // Move to previous char boundary
+                    self.input_cursor = self.input_text[..self.input_cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
                 }
             }
             KeyCode::Right => {
                 if self.input_cursor < self.input_text.len() {
-                    self.input_cursor += 1;
+                    // Move to next char boundary
+                    self.input_cursor = self.input_text[self.input_cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| self.input_cursor + i)
+                        .unwrap_or(self.input_text.len());
                 }
             }
             KeyCode::Home => {
@@ -569,6 +597,7 @@ impl App {
         self.engine_return_rx = Some(engine_rx);
 
         let mut engine_owned = engine;
+        engine_owned.set_cancel_token(self.cancel_token.clone());
         let file_ctx = file_context;
         tokio::spawn(async move {
             let _ = engine_owned
@@ -613,6 +642,31 @@ impl App {
                     self.engine = Some(engine);
                 }
             }
+
+            // Refresh quota in background after streaming completes
+            let client = MiniMaxClient::new(&self.config.api_key);
+            let (tx, rx) = oneshot::channel();
+            self.quota_refresh_rx = Some(rx);
+            tokio::spawn(async move {
+                if let Ok(q) = client.fetch_quota().await {
+                    let _ = tx.send(q);
+                }
+            });
+        }
+    }
+
+    /// Poll for a completed background quota refresh.
+    pub fn poll_quota(&mut self) {
+        if let Some(mut rx) = self.quota_refresh_rx.take() {
+            match rx.try_recv() {
+                Ok(quota) => {
+                    self.quota = Some(quota);
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    self.quota_refresh_rx = Some(rx); // put it back, still pending
+                }
+                Err(_) => {} // sender dropped, discard
+            }
         }
     }
 
@@ -656,7 +710,10 @@ impl App {
                 {
                     msg.content.push_str(&text);
                 }
-                self.scroll_offset = 0;
+                // Auto-scroll only if user is already at the bottom
+                if self.scroll_offset <= 1 {
+                    self.scroll_offset = 0;
+                }
             }
             ChatEvent::ToolCallsUpdate(tool_calls) => {
                 if let Some(msg) = self
@@ -939,6 +996,8 @@ async fn event_loop(
         }
 
         app.poll_chat_events();
+        app.poll_quota();
+        app.tick = app.tick.wrapping_add(1);
 
         if crossterm::event::poll(Duration::from_millis(16))? {
             let event = event::read()?;

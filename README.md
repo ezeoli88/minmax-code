@@ -4,8 +4,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat-square&logo=bun" />
-  <img src="https://img.shields.io/badge/UI-Ink%20(React%2018)-61dafb?style=flat-square&logo=react" />
+  <img src="https://img.shields.io/badge/lang-Rust-dea584?style=flat-square&logo=rust" />
+  <img src="https://img.shields.io/badge/TUI-Ratatui-61dafb?style=flat-square" />
   <img src="https://img.shields.io/badge/LLM-MiniMax%20M2.5-7c3aed?style=flat-square" />
   <img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" />
 </p>
@@ -166,10 +166,10 @@ All config lives at `~/.minmax-code/config.json`. Sessions persist in `~/.minmax
 ## Development
 
 ```bash
-bun install       # install deps
-bun dev           # run with hot reload
-bun start         # run normally
-bun run build     # compile standalone binary
+cargo build       # build debug
+cargo run         # run
+cargo test        # run tests
+cargo build --release  # compile optimized binary
 ```
 
 ---

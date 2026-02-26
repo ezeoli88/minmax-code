@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::text::{Line as TuiLine, Span};
-use ratatui::widgets::*;
+use ratatui::widgets::Paragraph;
 
 use crate::config::themes::Theme;
 use crate::tui::app::{App, DisplayMessage, MessageRole};
@@ -14,7 +14,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let visible_height = area.height as usize;
 
     // Pre-render all messages into flat lines
-    let all_lines = render_all_messages(&app.messages, theme, inner_width, app.is_streaming);
+    let all_lines = render_all_messages(&app.messages, theme, inner_width, app.is_streaming, app.tick);
 
     let total = all_lines.len();
     let max_scroll = total.saturating_sub(visible_height);
@@ -27,8 +27,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let visible: Vec<TuiLine> = all_lines[start..end].to_vec();
 
     let paragraph = Paragraph::new(visible)
-        .style(Style::default().bg(bg))
-        .wrap(Wrap { trim: false });
+        .style(Style::default().bg(bg));
 
     frame.render_widget(paragraph, area);
 }
@@ -39,12 +38,13 @@ fn render_all_messages<'a>(
     theme: &Theme,
     width: u16,
     is_streaming: bool,
+    tick: u64,
 ) -> Vec<TuiLine<'a>> {
     let mut lines: Vec<TuiLine<'a>> = Vec::new();
 
     for (i, msg) in messages.iter().enumerate() {
         let is_last = i == messages.len() - 1;
-        let msg_lines = render_message(msg, theme, width, is_last && is_streaming);
+        let msg_lines = render_message(msg, theme, width, is_last && is_streaming, tick);
         lines.extend(msg_lines);
         // Blank line separator between messages
         lines.push(TuiLine::from(""));
@@ -54,6 +54,9 @@ fn render_all_messages<'a>(
     if messages.is_empty() {
         lines.extend(render_welcome(theme));
     }
+
+    // Bottom padding so content doesn't sit flush against the input
+    lines.push(TuiLine::from(""));
 
     lines
 }
@@ -112,10 +115,11 @@ fn render_message<'a>(
     theme: &Theme,
     width: u16,
     is_active_stream: bool,
+    tick: u64,
 ) -> Vec<TuiLine<'a>> {
     match msg.role {
         MessageRole::User => render_user_message(msg, theme, width),
-        MessageRole::Assistant => render_assistant_message(msg, theme, width, is_active_stream),
+        MessageRole::Assistant => render_assistant_message(msg, theme, width, is_active_stream, tick),
         MessageRole::Tool => tool_view::render_tool_result_lines(msg, theme, width),
         MessageRole::System => render_system_message(msg, theme, width),
     }
@@ -153,6 +157,7 @@ fn render_assistant_message<'a>(
     theme: &Theme,
     width: u16,
     is_active_stream: bool,
+    tick: u64,
 ) -> Vec<TuiLine<'a>> {
     let purple = Color::Rgb(theme.purple.r, theme.purple.g, theme.purple.b);
     let dim = Color::Rgb(theme.dim_text.r, theme.dim_text.g, theme.dim_text.b);
@@ -171,8 +176,10 @@ fn render_assistant_message<'a>(
         let reasoning_lines: Vec<&str> = reasoning.lines().collect();
         let show_lines = reasoning_lines.len().min(3);
         for line in &reasoning_lines[..show_lines] {
-            let truncated = if line.len() > (width as usize - 6) {
-                format!("{}…", &line[..width as usize - 7])
+            let max_chars = (width as usize).saturating_sub(6);
+            let truncated = if line.chars().count() > max_chars {
+                let s: String = line.chars().take(max_chars.saturating_sub(1)).collect();
+                format!("{}…", s)
             } else {
                 line.to_string()
             };
@@ -192,14 +199,28 @@ fn render_assistant_message<'a>(
         }
     }
 
-    // Thinking indicator during streaming with no content
+    // Animated thinking indicator during streaming with no content
     if is_active_stream && msg.content.is_empty() && msg.tool_calls.is_empty() {
-        lines.push(TuiLine::from(vec![
-            Span::raw("    "),
-            Span::styled("●", Style::default().fg(purple)),
-            Span::styled("∙∙", Style::default().fg(dim)),
-            Span::styled("  thinking…", Style::default().fg(dim).italic()),
-        ]));
+        // Cycle every ~20 frames (~320ms per state at 16ms/frame)
+        let phase = (tick / 20) % 4;
+        let dots: &str = match phase {
+            0 => "●∙∙",
+            1 => "∙●∙",
+            2 => "∙∙●",
+            _ => "∙●∙",
+        };
+        let dot_spans: Vec<Span> = dots.chars().map(|ch| {
+            if ch == '●' {
+                Span::styled(String::from(ch), Style::default().fg(purple))
+            } else {
+                Span::styled(String::from(ch), Style::default().fg(dim))
+            }
+        }).collect();
+
+        let mut spans = vec![Span::raw("    ")];
+        spans.extend(dot_spans);
+        spans.push(Span::styled("  thinking…", Style::default().fg(dim).italic()));
+        lines.push(TuiLine::from(spans));
         return lines;
     }
 
@@ -256,9 +277,11 @@ fn wrap_text_simple(text: &str, max_width: usize) -> Vec<String> {
     let mut current_line = String::new();
 
     for word in text.split_whitespace() {
+        let word_chars = word.chars().count();
+        let line_chars = current_line.chars().count();
         if current_line.is_empty() {
             current_line = word.to_string();
-        } else if current_line.len() + 1 + word.len() > max_width {
+        } else if line_chars + 1 + word_chars > max_width {
             lines.push(current_line);
             current_line = word.to_string();
         } else {
