@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::settings::{save_config, AppConfig};
-use crate::core::api::{AccumulatedToolCall, MiniMaxClient};
+use crate::core::api::{AccumulatedToolCall, MiniMaxClient, QuotaInfo};
 use crate::core::chat::{ChatEngine, ChatEvent};
 use crate::core::commands::{handle_command, CommandResult};
 use crate::core::mcp::McpManager;
@@ -83,6 +83,7 @@ pub struct App {
     pub total_tokens: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub quota: Option<QuotaInfo>,
     pub session_name: String,
     pub screen: AppScreen,
     pub overlay: Overlay,
@@ -103,6 +104,7 @@ pub struct App {
     session_id: Option<String>,
     chat_event_rx: Option<mpsc::UnboundedReceiver<ChatEvent>>,
     engine_return_rx: Option<oneshot::Receiver<ChatEngine>>,
+    quota_refresh_rx: Option<oneshot::Receiver<QuotaInfo>>,
     cancel_token: CancellationToken,
     #[allow(dead_code)]
     mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
@@ -122,6 +124,7 @@ impl App {
             total_tokens: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            quota: None,
             session_name: "New Session".to_string(),
             screen: if needs_api_key {
                 AppScreen::ApiKeyPrompt
@@ -142,6 +145,7 @@ impl App {
             session_id: None,
             chat_event_rx: None,
             engine_return_rx: None,
+            quota_refresh_rx: None,
             cancel_token: CancellationToken::new(),
             mcp_manager: None,
             config,
@@ -168,6 +172,9 @@ impl App {
 
     pub async fn init_engine(&mut self) -> Result<()> {
         let client = MiniMaxClient::new(&self.config.api_key);
+        if let Ok(q) = client.fetch_quota().await {
+            self.quota = Some(q);
+        }
         let mut engine = ChatEngine::new(client, &self.config.model, self.mode);
 
         // Initialize session store
@@ -319,13 +326,13 @@ impl App {
         match key.code {
             KeyCode::Up => {
                 if key.modifiers.contains(KeyModifiers::NONE) && self.input_text.is_empty() {
-                    self.scroll_up(3);
+                    self.scroll_up(5);
                     return;
                 }
             }
             KeyCode::Down => {
                 if key.modifiers.contains(KeyModifiers::NONE) && self.input_text.is_empty() {
-                    self.scroll_down(3);
+                    self.scroll_down(5);
                     return;
                 }
             }
@@ -334,11 +341,11 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('u') => {
-                    self.scroll_up(15);
+                    self.scroll_up(20);
                     return;
                 }
                 KeyCode::Char('d') => {
-                    self.scroll_down(15);
+                    self.scroll_down(20);
                     return;
                 }
                 _ => {}
@@ -500,8 +507,8 @@ impl App {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.scroll_up(3),
-            MouseEventKind::ScrollDown => self.scroll_down(3),
+            MouseEventKind::ScrollUp => self.scroll_up(5),
+            MouseEventKind::ScrollDown => self.scroll_down(5),
             _ => {}
         }
     }
@@ -641,6 +648,30 @@ impl App {
                 }
             }
 
+            // Refresh quota in background after streaming completes
+            let client = MiniMaxClient::new(&self.config.api_key);
+            let (tx, rx) = oneshot::channel();
+            self.quota_refresh_rx = Some(rx);
+            tokio::spawn(async move {
+                if let Ok(q) = client.fetch_quota().await {
+                    let _ = tx.send(q);
+                }
+            });
+        }
+    }
+
+    /// Poll for a completed background quota refresh.
+    pub fn poll_quota(&mut self) {
+        if let Some(mut rx) = self.quota_refresh_rx.take() {
+            match rx.try_recv() {
+                Ok(q) => {
+                    self.quota = Some(q);
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    self.quota_refresh_rx = Some(rx);
+                }
+                Err(_) => {}
+            }
         }
     }
 
@@ -833,6 +864,7 @@ impl App {
         self.total_tokens = 0;
         self.prompt_tokens = 0;
         self.completion_tokens = 0;
+        self.quota = None;
         self.scroll_offset = 0;
 
         if let Some(store) = &self.session_store {
@@ -978,6 +1010,7 @@ async fn event_loop(
         }
 
         app.poll_chat_events();
+        app.poll_quota();
         app.tick = app.tick.wrapping_add(1);
 
         if crossterm::event::poll(Duration::from_millis(16))? {
