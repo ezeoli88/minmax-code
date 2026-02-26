@@ -135,6 +135,8 @@
       color: #c0caf5;
       overflow-x: auto;
       white-space: nowrap;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-x;
     }
 
     /* Typing cursor */
@@ -200,6 +202,7 @@
       max-width: 800px;
       width: 100%;
       padding: 32px 20px 0;
+      margin: 0 auto;
     }
 
     .mode-tabs {
@@ -275,6 +278,7 @@
       gap: 20px;
       max-width: 700px;
       padding: 48px 20px;
+      margin: 0 auto;
     }
 
     .feature {
@@ -307,6 +311,7 @@
       flex-wrap: wrap;
       max-width: 700px;
       padding: 16px 20px 48px;
+      margin: 0 auto;
     }
 
     .stat {
@@ -336,6 +341,7 @@
       padding: 32px 20px;
       color: #565f89;
       font-size: 0.8rem;
+      margin: 0 auto;
     }
 
     .footer a {
@@ -345,6 +351,146 @@
 
     .footer a:hover {
       text-decoration: underline;
+    }
+
+    @media (max-width: 900px) {
+      .hero {
+        padding-top: 64px;
+      }
+
+      h1 {
+        font-size: clamp(2rem, 8vw, 2.6rem);
+      }
+
+      .tagline {
+        font-size: 1.05rem;
+        margin-bottom: 36px;
+      }
+
+      .mode-toggle-section {
+        padding-top: 24px;
+      }
+    }
+
+    @media (max-width: 680px) {
+      body {
+        align-items: stretch;
+      }
+
+      .hero {
+        max-width: none;
+        padding: 56px 16px 28px;
+      }
+
+      .install-box {
+        width: calc(100% - 32px);
+        padding: 20px;
+      }
+
+      .os-tabs {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+
+      .os-tab {
+        padding: 10px 8px;
+        min-height: 40px;
+        font-size: 0.82rem;
+      }
+
+      .command-block {
+        padding: 14px 44px 14px 12px;
+        font-size: 0.78rem;
+      }
+
+      .copy-btn {
+        top: 8px;
+        right: 8px;
+        padding: 6px 8px;
+      }
+
+      .mode-toggle-section {
+        padding: 24px 16px 0;
+      }
+
+      .mode-tabs {
+        display: grid;
+        grid-template-columns: 1fr;
+      }
+
+      .mode-tab {
+        padding: 12px 14px;
+        font-size: 0.82rem;
+        letter-spacing: 0.6px;
+      }
+
+      .mode-description {
+        font-size: 0.8rem;
+      }
+
+      .features {
+        grid-template-columns: 1fr;
+        gap: 12px;
+        padding: 36px 16px;
+      }
+
+      .feature {
+        text-align: center;
+        padding: 14px 0;
+      }
+
+      .feature-icon {
+        font-size: 1.35rem;
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 20px 10px;
+        padding: 8px 16px 36px;
+      }
+
+      .stat-number {
+        font-size: 2rem;
+      }
+    }
+
+    @media (max-width: 420px) {
+      h1 {
+        font-size: 1.9rem;
+        letter-spacing: -0.5px;
+      }
+
+      .tagline {
+        font-size: 0.95rem;
+        margin-bottom: 28px;
+      }
+
+      .install-box {
+        width: calc(100% - 24px);
+        padding: 16px;
+      }
+
+      .os-tab {
+        padding: 8px 6px;
+        font-size: 0.76rem;
+      }
+
+      .command-block {
+        font-size: 0.72rem;
+        line-height: 1.45;
+        padding-right: 38px;
+      }
+
+      .mode-description {
+        font-size: 0.78rem;
+      }
+
+      .stats {
+        grid-template-columns: 1fr;
+        gap: 14px;
+      }
     }
   </style>
 </head>
@@ -448,6 +594,7 @@
     let stars = [];
     let animId;
     let paused = false;
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     function resize() {
       canvas.width = window.innerWidth;
@@ -457,7 +604,9 @@
     function init() {
       resize();
       stars = [];
-      for (let i = 0; i < 120; i++) {
+      const area = canvas.width * canvas.height;
+      const starCount = Math.max(40, Math.min(120, Math.round(area / 16000)));
+      for (let i = 0; i < starCount; i++) {
         stars.push({
           x: Math.random() * canvas.width,
           y: Math.random() * canvas.height,
@@ -469,7 +618,12 @@
     }
 
     function draw() {
-      if (paused) { animId = requestAnimationFrame(draw); return; }
+      if (paused) {
+        if (!prefersReducedMotion) {
+          animId = requestAnimationFrame(draw);
+        }
+        return;
+      }
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       for (const s of stars) {
         s.y -= s.speed;
@@ -479,11 +633,18 @@
         ctx.fillStyle = `rgba(122, 162, 247, ${s.opacity})`;
         ctx.fill();
       }
-      animId = requestAnimationFrame(draw);
+      if (!prefersReducedMotion) {
+        animId = requestAnimationFrame(draw);
+      }
     }
 
     document.addEventListener('visibilitychange', () => { paused = document.hidden; });
-    window.addEventListener('resize', resize);
+    window.addEventListener('resize', () => {
+      init();
+      if (prefersReducedMotion) {
+        draw();
+      }
+    });
     init();
     draw();
   })();
