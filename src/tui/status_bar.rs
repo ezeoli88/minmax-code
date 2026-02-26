@@ -43,9 +43,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     } else {
         "0".to_string()
     };
+    let version = env!("CARGO_PKG_VERSION");
     let right_text = format!(
-        "Tokens: {} | /: cmds | Tab: mode ",
-        token_str
+        "v{} | Tokens: {} | /: cmds | Tab: mode ",
+        version, token_str
     );
 
     // Calculate spacing

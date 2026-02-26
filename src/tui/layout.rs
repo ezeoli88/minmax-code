@@ -3,7 +3,7 @@ use ratatui::widgets::*;
 
 use crate::config::themes::get_theme;
 use crate::tui::api_key_prompt;
-use crate::tui::app::{App, AppScreen, Overlay};
+use crate::tui::app::{App, AppScreen, Overlay, SystemMessageType};
 use crate::tui::chat_view;
 use crate::tui::command_palette;
 use crate::tui::config_menu;
@@ -75,13 +75,13 @@ fn draw_chat_screen(frame: &mut Frame, app: &App, theme: &crate::config::themes:
 
     // Draw system message if present
     if let (Some(area), Some(msg)) = (system_area, &app.system_message) {
-        let warning = Paragraph::new(format!(" \u{26a0} {}", msg))
-            .style(Style::default().fg(Color::Rgb(
-                theme.warning.r,
-                theme.warning.g,
-                theme.warning.b,
-            )));
-        frame.render_widget(warning, area);
+        let (icon, color) = match app.system_message_type {
+            SystemMessageType::Update => ("\u{2191}", &theme.accent),
+            SystemMessageType::Warning => ("\u{26a0}", &theme.warning),
+        };
+        let banner = Paragraph::new(format!(" {} {}", icon, msg))
+            .style(Style::default().fg(Color::Rgb(color.r, color.g, color.b)));
+        frame.render_widget(banner, area);
     }
 
     // Draw input

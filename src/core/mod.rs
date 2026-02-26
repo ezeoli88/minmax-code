@@ -4,6 +4,7 @@ pub mod commands;
 pub mod mcp;
 pub mod parser;
 pub mod session;
+pub mod update;
 
 /// Operating mode for the CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

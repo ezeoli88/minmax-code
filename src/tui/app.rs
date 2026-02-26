@@ -25,6 +25,14 @@ const TOKEN_WARNING_THRESHOLD: u64 = 180_000;
 const TOKEN_LIMIT: u64 = 200_000;
 const SYSTEM_MESSAGE_TTL_SECONDS: u64 = 10;
 
+// ── System message types ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SystemMessageType {
+    Warning,
+    Update,
+}
+
 // ── Display message types ───────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -89,6 +97,7 @@ pub struct App {
     pub screen: AppScreen,
     pub overlay: Overlay,
     pub system_message: Option<String>,
+    pub system_message_type: SystemMessageType,
     pub is_streaming: bool,
     pub should_quit: bool,
     pub tick: u64,
@@ -106,6 +115,7 @@ pub struct App {
     chat_event_rx: Option<mpsc::UnboundedReceiver<ChatEvent>>,
     engine_return_rx: Option<oneshot::Receiver<ChatEngine>>,
     quota_refresh_rx: Option<oneshot::Receiver<Result<QuotaInfo, String>>>,
+    update_check_rx: Option<oneshot::Receiver<Option<String>>>,
     system_message_expires_at: Option<Instant>,
     cancel_token: CancellationToken,
     #[allow(dead_code)]
@@ -135,6 +145,7 @@ impl App {
             },
             overlay: Overlay::None,
             system_message: None,
+            system_message_type: SystemMessageType::Warning,
             is_streaming: false,
             should_quit: false,
             tick: 0,
@@ -148,6 +159,7 @@ impl App {
             chat_event_rx: None,
             engine_return_rx: None,
             quota_refresh_rx: None,
+            update_check_rx: None,
             system_message_expires_at: None,
             cancel_token: CancellationToken::new(),
             mcp_manager: None,
@@ -206,6 +218,7 @@ impl App {
         }
 
         self.engine = Some(engine);
+        self.start_update_check();
         Ok(())
     }
 
@@ -690,8 +703,56 @@ impl App {
         });
     }
 
+    fn start_update_check(&mut self) {
+        if self.update_check_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = oneshot::channel();
+        self.update_check_rx = Some(rx);
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(8),
+                crate::core::update::check_for_update(),
+            )
+            .await
+            .unwrap_or(None);
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Poll for a completed background update check.
+    pub fn poll_update_check(&mut self) {
+        if let Some(mut rx) = self.update_check_rx.take() {
+            match rx.try_recv() {
+                Ok(Some(version)) => {
+                    let msg = if cfg!(target_os = "windows") {
+                        format!(
+                            "New version v{} available! Run: irm https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.ps1 | iex",
+                            version
+                        )
+                    } else {
+                        format!(
+                            "New version v{} available! Run: curl -fsSL https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.sh | sh",
+                            version
+                        )
+                    };
+                    self.system_message = Some(msg);
+                    self.system_message_type = SystemMessageType::Update;
+                    self.system_message_expires_at =
+                        Some(Instant::now() + Duration::from_secs(SYSTEM_MESSAGE_TTL_SECONDS));
+                }
+                Ok(None) => {}
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    self.update_check_rx = Some(rx);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
     fn set_system_message(&mut self, msg: impl Into<String>) {
         self.system_message = Some(msg.into());
+        self.system_message_type = SystemMessageType::Warning;
         self.system_message_expires_at =
             Some(Instant::now() + Duration::from_secs(SYSTEM_MESSAGE_TTL_SECONDS));
     }
@@ -1045,6 +1106,7 @@ async fn event_loop(
 
         app.poll_chat_events();
         app.poll_quota();
+        app.poll_update_check();
         app.poll_system_message_expiry();
         app.tick = app.tick.wrapping_add(1);
 
