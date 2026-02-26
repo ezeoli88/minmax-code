@@ -15,15 +15,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut left_parts = vec![format!("Session: {}", app.session_name)];
 
     if let Some(quota) = &app.quota {
-        let pct = if quota.total > 0 {
-            (quota.remaining as f64 / quota.total as f64 * 100.0) as u64
+        let used_pct = if quota.total > 0 {
+            ((quota.used as f64 / quota.total as f64) * 100.0).round() as u64
         } else {
             0
         };
         left_parts.push(format!(
-            "Quota: {}/{} ({}%) Reset: {}m",
-            quota.used, quota.total, pct, quota.reset_minutes
+            "Quota left: {}/{} ({}% used) Reset: {}",
+            quota.remaining,
+            quota.total,
+            used_pct,
+            format_reset(quota.reset_minutes)
         ));
+    } else if !app.config.api_key.is_empty() {
+        left_parts.push("Quota: loading...".to_string());
     }
     let left_text = format!(" {}", left_parts.join(" | "));
 
@@ -69,6 +74,16 @@ fn format_tokens(tokens: u64) -> String {
     }
 }
 
+fn format_reset(minutes: u64) -> String {
+    let hours = minutes / 60;
+    let mins = minutes % 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m", mins)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +103,15 @@ mod tests {
     #[test]
     fn format_tokens_millions() {
         assert_eq!(format_tokens(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn format_reset_minutes_only() {
+        assert_eq!(format_reset(9), "9m");
+    }
+
+    #[test]
+    fn format_reset_hours_and_minutes() {
+        assert_eq!(format_reset(249), "4h 9m");
     }
 }

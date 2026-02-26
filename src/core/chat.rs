@@ -347,9 +347,20 @@ impl ChatEngine {
                     result.reasoning_details.iter().map(|t| serde_json::json!({"text": t})).collect::<Vec<_>>()
                 );
             }
-            if !result.tool_calls.is_empty() {
+            let sanitized_tool_calls: Vec<AccumulatedToolCall> = final_tool_calls
+                .iter()
+                .cloned()
+                .map(|mut tc| {
+                    if serde_json::from_str::<Value>(&tc.function.arguments).is_err() {
+                        tc.function.arguments = "{}".to_string();
+                    }
+                    tc
+                })
+                .collect();
+
+            if !sanitized_tool_calls.is_empty() {
                 hist_entry["tool_calls"] = serde_json::json!(
-                    result.tool_calls.iter().map(|tc| serde_json::json!({
+                    sanitized_tool_calls.iter().map(|tc| serde_json::json!({
                         "id": tc.id,
                         "type": "function",
                         "function": {
@@ -360,10 +371,10 @@ impl ChatEngine {
                 );
             }
             self.history.push(hist_entry);
-            let tool_calls_json = if final_tool_calls.is_empty() {
+            let tool_calls_json = if sanitized_tool_calls.is_empty() {
                 None
             } else {
-                Some(serde_json::to_string(&final_tool_calls).unwrap_or_default())
+                Some(serde_json::to_string(&sanitized_tool_calls).unwrap_or_default())
             };
             self.persist_message(
                 "assistant",

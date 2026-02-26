@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::prelude::*;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -23,6 +23,7 @@ use crate::tui::layout as tui_layout;
 
 const TOKEN_WARNING_THRESHOLD: u64 = 180_000;
 const TOKEN_LIMIT: u64 = 200_000;
+const SYSTEM_MESSAGE_TTL_SECONDS: u64 = 10;
 
 // ── Display message types ───────────────────────────────────────────────
 
@@ -104,7 +105,8 @@ pub struct App {
     session_id: Option<String>,
     chat_event_rx: Option<mpsc::UnboundedReceiver<ChatEvent>>,
     engine_return_rx: Option<oneshot::Receiver<ChatEngine>>,
-    quota_refresh_rx: Option<oneshot::Receiver<QuotaInfo>>,
+    quota_refresh_rx: Option<oneshot::Receiver<Result<QuotaInfo, String>>>,
+    system_message_expires_at: Option<Instant>,
     cancel_token: CancellationToken,
     #[allow(dead_code)]
     mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
@@ -146,6 +148,7 @@ impl App {
             chat_event_rx: None,
             engine_return_rx: None,
             quota_refresh_rx: None,
+            system_message_expires_at: None,
             cancel_token: CancellationToken::new(),
             mcp_manager: None,
             config,
@@ -172,9 +175,7 @@ impl App {
 
     pub async fn init_engine(&mut self) -> Result<()> {
         let client = MiniMaxClient::new(&self.config.api_key);
-        if let Ok(q) = client.fetch_quota().await {
-            self.quota = Some(q);
-        }
+        self.start_quota_refresh();
         let mut engine = ChatEngine::new(client, &self.config.model, self.mode);
 
         // Initialize session store
@@ -193,7 +194,7 @@ impl App {
             let mut mcp_manager = McpManager::new();
             let tools = mcp_manager.init_servers(&self.config.mcp_servers).await;
             if !tools.is_empty() {
-                self.system_message = Some(format!(
+                self.set_system_message(format!(
                     "Connected {} MCP tool(s): {}",
                     tools.len(),
                     tools.join(", ")
@@ -277,14 +278,14 @@ impl App {
                 self.config.api_key = api_key;
                 let _ = save_config(&self.config);
                 self.screen = AppScreen::Chat;
-                self.system_message = Some("API key updated.".to_string());
+                self.set_system_message("API key updated.");
                 self.engine = None; // Will be re-initialized
             }
             ConfigAction::SetTheme(theme) => {
                 self.config.theme = theme.clone();
                 let _ = save_config(&self.config);
                 self.screen = AppScreen::Chat;
-                self.system_message = Some(format!("Theme changed to {}", theme));
+                self.set_system_message(format!("Theme changed to {}", theme));
             }
             ConfigAction::SetModel(model) => {
                 self.config.model = model.clone();
@@ -293,7 +294,7 @@ impl App {
                 }
                 let _ = save_config(&self.config);
                 self.screen = AppScreen::Chat;
-                self.system_message = Some(format!("Model changed to {}", model));
+                self.set_system_message(format!("Model changed to {}", model));
             }
             ConfigAction::None => {}
         }
@@ -311,7 +312,7 @@ impl App {
             if self.is_streaming {
                 self.cancel_streaming();
             } else if self.system_message.is_some() {
-                self.system_message = None;
+                self.clear_system_message();
             }
             return;
         }
@@ -443,7 +444,7 @@ impl App {
                         self.overlay = Overlay::None;
                         self.config.theme = theme.clone();
                         let _ = save_config(&self.config);
-                        self.system_message = Some(format!("Theme changed to {}", theme));
+                        self.set_system_message(format!("Theme changed to {}", theme));
                     }
                     PaletteAction::SetModel(model) => {
                         self.overlay = Overlay::None;
@@ -452,7 +453,7 @@ impl App {
                             engine.set_model(&model);
                         }
                         let _ = save_config(&self.config);
-                        self.system_message = Some(format!("Model changed to {}", model));
+                        self.set_system_message(format!("Model changed to {}", model));
                     }
                     PaletteAction::None => {}
                 }
@@ -649,14 +650,7 @@ impl App {
             }
 
             // Refresh quota in background after streaming completes
-            let client = MiniMaxClient::new(&self.config.api_key);
-            let (tx, rx) = oneshot::channel();
-            self.quota_refresh_rx = Some(rx);
-            tokio::spawn(async move {
-                if let Ok(q) = client.fetch_quota().await {
-                    let _ = tx.send(q);
-                }
-            });
+            self.start_quota_refresh();
         }
     }
 
@@ -664,13 +658,53 @@ impl App {
     pub fn poll_quota(&mut self) {
         if let Some(mut rx) = self.quota_refresh_rx.take() {
             match rx.try_recv() {
-                Ok(q) => {
+                Ok(Ok(q)) => {
                     self.quota = Some(q);
+                }
+                Ok(Err(e)) => {
+                    self.set_system_message(format!("Quota fetch failed: {}", e));
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {
                     self.quota_refresh_rx = Some(rx);
                 }
                 Err(_) => {}
+            }
+        }
+    }
+
+    fn start_quota_refresh(&mut self) {
+        if self.config.api_key.is_empty() || self.quota_refresh_rx.is_some() {
+            return;
+        }
+
+        let client = MiniMaxClient::new(&self.config.api_key);
+        let (tx, rx) = oneshot::channel();
+        self.quota_refresh_rx = Some(rx);
+
+        tokio::spawn(async move {
+            let result = match tokio::time::timeout(Duration::from_secs(8), client.fetch_quota()).await {
+                Ok(inner) => inner.map_err(|e| e.to_string()),
+                Err(_) => Err("Quota fetch timed out after 8s".to_string()),
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    fn set_system_message(&mut self, msg: impl Into<String>) {
+        self.system_message = Some(msg.into());
+        self.system_message_expires_at =
+            Some(Instant::now() + Duration::from_secs(SYSTEM_MESSAGE_TTL_SECONDS));
+    }
+
+    fn clear_system_message(&mut self) {
+        self.system_message = None;
+        self.system_message_expires_at = None;
+    }
+
+    fn poll_system_message_expiry(&mut self) {
+        if let Some(expires_at) = self.system_message_expires_at {
+            if Instant::now() >= expires_at {
+                self.clear_system_message();
             }
         }
     }
@@ -791,7 +825,7 @@ impl App {
                 self.check_token_limits();
             }
             ChatEvent::Error(msg) => {
-                self.system_message = Some(msg);
+                self.set_system_message(msg);
             }
         }
     }
@@ -799,13 +833,11 @@ impl App {
     /// Check token limits and show warning or auto-new-session.
     fn check_token_limits(&mut self) {
         if self.total_tokens >= TOKEN_LIMIT {
-            self.system_message =
-                Some("Token limit reached. Starting new session...".to_string());
+            self.set_system_message("Token limit reached. Starting new session...");
             self.new_session();
         } else if self.total_tokens >= TOKEN_WARNING_THRESHOLD {
-            self.system_message = Some(
+            self.set_system_message(
                 "Warning: Approaching token limit. Consider starting a new session with /new"
-                    .to_string(),
             );
         }
     }
@@ -848,12 +880,12 @@ impl App {
                     engine.set_model(&model);
                 }
                 let _ = save_config(&self.config);
-                self.system_message = Some(format!("Model changed to {}", model));
+                self.set_system_message(format!("Model changed to {}", model));
             }
             CommandResult::SetTheme(theme) => {
                 self.config.theme = theme.clone();
                 let _ = save_config(&self.config);
-                self.system_message = Some(format!("Theme changed to {}", theme));
+                self.set_system_message(format!("Theme changed to {}", theme));
             }
             CommandResult::None => {}
         }
@@ -864,8 +896,10 @@ impl App {
         self.total_tokens = 0;
         self.prompt_tokens = 0;
         self.completion_tokens = 0;
-        self.quota = None;
         self.scroll_offset = 0;
+
+        // Refresh quota in background (account-level, not session-level)
+        self.start_quota_refresh();
 
         if let Some(store) = &self.session_store {
             if let Ok(session) = store.create_session(&self.config.model) {
@@ -1011,6 +1045,7 @@ async fn event_loop(
 
         app.poll_chat_events();
         app.poll_quota();
+        app.poll_system_message_expiry();
         app.tick = app.tick.wrapping_add(1);
 
         if crossterm::event::poll(Duration::from_millis(16))? {

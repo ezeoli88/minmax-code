@@ -1,5 +1,6 @@
 use super::ToolExecutionResult;
 use serde_json::Value;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -33,58 +34,120 @@ pub async fn execute(args: Value) -> ToolExecutionResult {
         return ToolExecutionResult::text("Error: No command provided".to_string());
     }
 
-    let result = tokio::time::timeout(
+    let result = run_command_with_platform_shell(command).await;
+    match result {
+        Ok(output) => ToolExecutionResult::text(format_output(output)),
+        Err(e) => ToolExecutionResult::text(format!("Error executing command: {}", e)),
+    }
+}
+
+async fn run_command_with_platform_shell(command: &str) -> Result<std::process::Output, String> {
+    #[cfg(target_os = "windows")]
+    {
+        // Prefer Git Bash when available so Unix-like commands (rm, mv, cp) work as expected.
+        if let Some(git_bash) = find_windows_git_bash() {
+            match run_with_timeout(&git_bash, &["-lc", command]).await {
+                Ok(output) => return Ok(output),
+                Err(e) if e.contains("cannot find the file specified") || e.contains("not found") => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Fallback: PowerShell and then cmd for Windows environments without Git Bash.
+        match run_with_timeout("powershell", &["-NoProfile", "-Command", command]).await {
+            Ok(output) => return Ok(output),
+            Err(e) if e.contains("cannot find the file specified") || e.contains("not found") => {}
+            Err(e) => return Err(e),
+        }
+
+        match run_with_timeout("pwsh", &["-NoProfile", "-Command", command]).await {
+            Ok(output) => return Ok(output),
+            Err(e) if e.contains("cannot find the file specified") || e.contains("not found") => {}
+            Err(e) => return Err(e),
+        }
+
+        return run_with_timeout("cmd", &["/C", command]).await;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        run_with_timeout("bash", &["-lc", command]).await
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_git_bash() -> Option<String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        candidates.push(PathBuf::from(pf).join("Git\\usr\\bin\\bash.exe"));
+    }
+    if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+        candidates.push(PathBuf::from(pf86).join("Git\\usr\\bin\\bash.exe"));
+    }
+    candidates.push(PathBuf::from(r"C:\Program Files\Git\usr\bin\bash.exe"));
+    candidates.push(PathBuf::from(r"C:\Program Files (x86)\Git\usr\bin\bash.exe"));
+
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+async fn run_with_timeout(program: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    let run = tokio::time::timeout(
         Duration::from_secs(30),
-        Command::new("bash")
-            .arg("-c")
-            .arg(command)
+        Command::new(program)
+            .args(args)
             .current_dir(std::env::current_dir().unwrap_or_default())
             .output(),
     )
     .await;
 
-    match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code().unwrap_or(-1);
-
-            let max_len = 10_000;
-            let stdout_trunc = if stdout.len() > max_len {
-                format!("{}...(truncated)", &stdout[..max_len])
-            } else {
-                stdout.to_string()
-            };
-            let stderr_trunc = if stderr.len() > max_len {
-                format!("{}...(truncated)", &stderr[..max_len])
-            } else {
-                stderr.to_string()
-            };
-
-            let mut result = String::new();
-            if !stdout_trunc.is_empty() {
-                result.push_str(&stdout_trunc);
-            }
-            if !stderr_trunc.is_empty() {
-                if !result.is_empty() {
-                    result.push('\n');
-                }
-                result.push_str("stderr: ");
-                result.push_str(&stderr_trunc);
-            }
-            if exit_code != 0 {
-                if !result.is_empty() {
-                    result.push('\n');
-                }
-                result.push_str(&format!("Exit code: {}", exit_code));
-            }
-            if result.is_empty() {
-                result = "(no output)".to_string();
-            }
-
-            ToolExecutionResult::text(result)
-        }
-        Ok(Err(e)) => ToolExecutionResult::text(format!("Error executing command: {}", e)),
-        Err(_) => ToolExecutionResult::text("Error: Command timed out after 30 seconds".to_string()),
+    match run {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("Command timed out after 30 seconds".to_string()),
     }
+}
+
+fn format_output(output: std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    let max_len = 10_000;
+    let stdout_trunc = if stdout.len() > max_len {
+        format!("{}...(truncated)", &stdout[..max_len])
+    } else {
+        stdout.to_string()
+    };
+    let stderr_trunc = if stderr.len() > max_len {
+        format!("{}...(truncated)", &stderr[..max_len])
+    } else {
+        stderr.to_string()
+    };
+
+    let mut result = String::new();
+    if !stdout_trunc.is_empty() {
+        result.push_str(&stdout_trunc);
+    }
+    if !stderr_trunc.is_empty() {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str("stderr: ");
+        result.push_str(&stderr_trunc);
+    }
+    if exit_code != 0 {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&format!("Exit code: {}", exit_code));
+    }
+    if result.is_empty() {
+        result = "(no output)".to_string();
+    }
+
+    result
 }
