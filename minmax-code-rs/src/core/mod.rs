@@ -1,6 +1,7 @@
 pub mod api;
 pub mod chat;
 pub mod commands;
+pub mod mcp;
 pub mod parser;
 pub mod session;
 

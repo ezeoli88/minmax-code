@@ -10,9 +10,19 @@ use crate::config::settings::{save_config, AppConfig};
 use crate::core::api::{AccumulatedToolCall, MiniMaxClient, QuotaInfo};
 use crate::core::chat::{ChatEngine, ChatEvent};
 use crate::core::commands::{handle_command, CommandResult};
+use crate::core::mcp::McpManager;
 use crate::core::session::SessionStore;
 use crate::core::Mode;
+use crate::tui::api_key_prompt::{self, ApiKeyAction, ApiKeyPromptState};
+use crate::tui::command_palette::{self, CommandPaletteState, PaletteAction};
+use crate::tui::config_menu::{self, ConfigAction, ConfigMenuState};
+use crate::tui::file_picker::{self, FilePickerAction, FilePickerState};
 use crate::tui::layout as tui_layout;
+
+// ── Token limit constants ──────────────────────────────────────────────
+
+const TOKEN_WARNING_THRESHOLD: u64 = 180_000;
+const TOKEN_LIMIT: u64 = 200_000;
 
 // ── Display message types ───────────────────────────────────────────────
 
@@ -42,12 +52,22 @@ pub enum ToolStatus {
     Error,
 }
 
+// ── Screen state ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppScreen {
+    Chat,
+    ApiKeyPrompt,
+    ConfigMenu,
+}
+
 // ── Overlay state ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Overlay {
     None,
-    CommandPalette { selected: usize },
+    CommandPalette,
+    FilePicker,
     SessionList { selected: usize },
 }
 
@@ -63,10 +83,17 @@ pub struct App {
     pub total_tokens: u64,
     pub quota: Option<QuotaInfo>,
     pub session_name: String,
+    pub screen: AppScreen,
     pub overlay: Overlay,
     pub system_message: Option<String>,
     pub is_streaming: bool,
     pub should_quit: bool,
+
+    // Overlay states
+    pub palette_state: CommandPaletteState,
+    pub file_picker_state: FilePickerState,
+    pub config_menu_state: ConfigMenuState,
+    pub api_key_state: ApiKeyPromptState,
 
     // Internal
     engine: Option<ChatEngine>,
@@ -75,10 +102,15 @@ pub struct App {
     chat_event_rx: Option<mpsc::UnboundedReceiver<ChatEvent>>,
     engine_return_rx: Option<oneshot::Receiver<ChatEngine>>,
     cancel_token: CancellationToken,
+    #[allow(dead_code)]
+    mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
 }
 
 impl App {
     pub fn new(config: AppConfig) -> Self {
+        let needs_api_key = config.api_key.is_empty()
+            && std::env::var("MINIMAX_API_KEY").unwrap_or_default().is_empty();
+
         Self {
             mode: Mode::Builder,
             messages: Vec::new(),
@@ -88,32 +120,49 @@ impl App {
             total_tokens: 0,
             quota: None,
             session_name: "New Session".to_string(),
+            screen: if needs_api_key {
+                AppScreen::ApiKeyPrompt
+            } else {
+                AppScreen::Chat
+            },
             overlay: Overlay::None,
             system_message: None,
             is_streaming: false,
             should_quit: false,
+            palette_state: CommandPaletteState::new(),
+            file_picker_state: FilePickerState::new(),
+            config_menu_state: ConfigMenuState::new(),
+            api_key_state: ApiKeyPromptState::new(),
             engine: None,
             session_store: None,
             session_id: None,
             chat_event_rx: None,
             engine_return_rx: None,
             cancel_token: CancellationToken::new(),
+            mcp_manager: None,
             config,
         }
     }
 
     /// Initialize the chat engine and session store.
-    pub fn initialize(&mut self) -> Result<()> {
+    pub async fn initialize(&mut self) -> Result<()> {
+        // Try env var fallback for API key
         if self.config.api_key.is_empty() {
-            self.system_message = Some(
-                "No API key configured. Run /config or set MINIMAX_API_KEY env var.".to_string(),
-            );
-            // Try env var fallback
             if let Ok(key) = std::env::var("MINIMAX_API_KEY") {
                 self.config.api_key = key;
+                self.screen = AppScreen::Chat;
             }
         }
 
+        if self.config.api_key.is_empty() {
+            self.screen = AppScreen::ApiKeyPrompt;
+            return Ok(());
+        }
+
+        self.init_engine().await
+    }
+
+    pub async fn init_engine(&mut self) -> Result<()> {
         let client = MiniMaxClient::new(&self.config.api_key);
         let mut engine = ChatEngine::new(client, &self.config.model, self.mode);
 
@@ -126,6 +175,20 @@ impl App {
                 engine.set_session(session.id, store.clone());
             }
             self.session_store = Some(store);
+        }
+
+        // Initialize MCP servers if configured
+        if !self.config.mcp_servers.is_empty() {
+            let mut mcp_manager = McpManager::new();
+            let tools = mcp_manager.init_servers(&self.config.mcp_servers).await;
+            if !tools.is_empty() {
+                self.system_message = Some(format!(
+                    "Connected {} MCP tool(s): {}",
+                    tools.len(),
+                    tools.join(", ")
+                ));
+            }
+            self.mcp_manager = Some(Arc::new(tokio::sync::Mutex::new(mcp_manager)));
         }
 
         self.engine = Some(engine);
@@ -141,7 +204,7 @@ impl App {
         match event {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Resize(_, _) => {} // Layout re-calculates on next draw
+            Event::Resize(_, _) => {}
             _ => {}
         }
     }
@@ -157,6 +220,68 @@ impl App {
             return;
         }
 
+        // Route to current screen
+        match self.screen {
+            AppScreen::ApiKeyPrompt => self.handle_api_key_key(key),
+            AppScreen::ConfigMenu => self.handle_config_menu_key(key),
+            AppScreen::Chat => self.handle_chat_key(key),
+        }
+    }
+
+    fn handle_api_key_key(&mut self, key: KeyEvent) {
+        let action = api_key_prompt::handle_key(&mut self.api_key_state, key);
+        match action {
+            ApiKeyAction::Submit(api_key) => {
+                self.config.api_key = api_key;
+                let _ = save_config(&self.config);
+                self.screen = AppScreen::Chat;
+            }
+            ApiKeyAction::Quit => {
+                self.should_quit = true;
+            }
+            ApiKeyAction::None => {}
+        }
+    }
+
+    fn handle_config_menu_key(&mut self, key: KeyEvent) {
+        let action = config_menu::handle_key(
+            &mut self.config_menu_state,
+            key,
+            &self.config.api_key,
+            &self.config.theme,
+            &self.config.model,
+        );
+        match action {
+            ConfigAction::Close => {
+                self.screen = AppScreen::Chat;
+            }
+            ConfigAction::SetApiKey(api_key) => {
+                self.config.api_key = api_key;
+                let _ = save_config(&self.config);
+                self.screen = AppScreen::Chat;
+                self.system_message = Some("API key updated.".to_string());
+                self.engine = None; // Will be re-initialized
+            }
+            ConfigAction::SetTheme(theme) => {
+                self.config.theme = theme.clone();
+                let _ = save_config(&self.config);
+                self.screen = AppScreen::Chat;
+                self.system_message = Some(format!("Theme changed to {}", theme));
+            }
+            ConfigAction::SetModel(model) => {
+                self.config.model = model.clone();
+                if let Some(engine) = &mut self.engine {
+                    engine.set_model(&model);
+                }
+                let _ = save_config(&self.config);
+                self.screen = AppScreen::Chat;
+                self.system_message = Some(format!("Model changed to {}", model));
+            }
+            ConfigAction::None => {}
+        }
+    }
+
+    fn handle_chat_key(&mut self, key: KeyEvent) {
         // Handle overlay input first
         if self.overlay != Overlay::None {
             self.handle_overlay_key(key);
@@ -219,6 +344,21 @@ impl App {
             KeyCode::Char(c) => {
                 self.input_text.insert(self.input_cursor, c);
                 self.input_cursor += 1;
+
+                // Check for '/' at start of input → open command palette
+                if self.input_text == "/" {
+                    self.input_text.clear();
+                    self.input_cursor = 0;
+                    self.palette_state = CommandPaletteState::new();
+                    self.overlay = Overlay::CommandPalette;
+                }
+                // Check for '@' at start → open file picker
+                else if c == '@' && self.input_cursor == 1 && self.input_text.len() == 1 {
+                    self.file_picker_state = FilePickerState::new();
+                    self.overlay = Overlay::FilePicker;
+                    self.input_text.remove(self.input_cursor - 1);
+                    self.input_cursor -= 1;
+                }
             }
             KeyCode::Backspace => {
                 if self.input_cursor > 0 {
@@ -252,39 +392,57 @@ impl App {
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
-            self.overlay = Overlay::None;
-            return;
-        }
-
-        // Extract overlay state to avoid borrow conflicts
-        let overlay_clone = self.overlay.clone();
-        match overlay_clone {
-            Overlay::CommandPalette { mut selected } => {
-                let commands = command_palette_items();
-                match key.code {
-                    KeyCode::Up => {
-                        if selected > 0 {
-                            selected -= 1;
-                        }
-                        self.overlay = Overlay::CommandPalette { selected };
-                    }
-                    KeyCode::Down => {
-                        if selected < commands.len().saturating_sub(1) {
-                            selected += 1;
-                        }
-                        self.overlay = Overlay::CommandPalette { selected };
-                    }
-                    KeyCode::Enter => {
-                        let cmd = &commands[selected];
-                        let result = handle_command(cmd.0);
+        match self.overlay.clone() {
+            Overlay::CommandPalette => {
+                let action = command_palette::handle_key(&mut self.palette_state, key);
+                match action {
+                    PaletteAction::Close => {
                         self.overlay = Overlay::None;
+                    }
+                    PaletteAction::Execute(cmd) => {
+                        self.overlay = Overlay::None;
+                        let result = handle_command(&cmd);
                         self.apply_command_result(result);
                     }
-                    _ => {}
+                    PaletteAction::SetTheme(theme) => {
+                        self.overlay = Overlay::None;
+                        self.config.theme = theme.clone();
+                        let _ = save_config(&self.config);
+                        self.system_message = Some(format!("Theme changed to {}", theme));
+                    }
+                    PaletteAction::SetModel(model) => {
+                        self.overlay = Overlay::None;
+                        self.config.model = model.clone();
+                        if let Some(engine) = &mut self.engine {
+                            engine.set_model(&model);
+                        }
+                        let _ = save_config(&self.config);
+                        self.system_message = Some(format!("Model changed to {}", model));
+                    }
+                    PaletteAction::None => {}
+                }
+            }
+            Overlay::FilePicker => {
+                let action = file_picker::handle_key(&mut self.file_picker_state, key);
+                match action {
+                    FilePickerAction::Close => {
+                        self.overlay = Overlay::None;
+                    }
+                    FilePickerAction::Select(path) => {
+                        self.overlay = Overlay::None;
+                        let insert = format!("@{} ", path);
+                        self.input_text.insert_str(self.input_cursor, &insert);
+                        self.input_cursor += insert.len();
+                    }
+                    FilePickerAction::TabComplete(_) => {}
+                    FilePickerAction::None => {}
                 }
             }
             Overlay::SessionList { mut selected } => {
+                if key.code == KeyCode::Esc {
+                    self.overlay = Overlay::None;
+                    return;
+                }
                 let sessions = self.list_sessions();
                 match key.code {
                     KeyCode::Up => {
@@ -356,10 +514,14 @@ impl App {
             return;
         }
 
+        // Resolve @file references
+        let (clean_text, file_context) = file_picker::resolve_file_references(&text);
+        let display_text = clean_text.clone();
+
         // Add user message to display
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
-            content: text.clone(),
+            content: display_text,
             reasoning: None,
             tool_calls: Vec::new(),
             is_streaming: false,
@@ -375,10 +537,10 @@ impl App {
         self.input_cursor = 0;
 
         // Start streaming
-        self.start_streaming(text);
+        self.start_streaming(text, file_context);
     }
 
-    fn start_streaming(&mut self, user_input: String) {
+    fn start_streaming(&mut self, user_input: String, file_context: Option<String>) {
         let Some(engine) = self.engine.take() else {
             return;
         };
@@ -405,22 +567,21 @@ impl App {
         self.engine_return_rx = Some(engine_rx);
 
         let mut engine_owned = engine;
+        let file_ctx = file_context;
         tokio::spawn(async move {
             let _ = engine_owned
-                .send_message(&user_input, None, event_tx)
+                .send_message(&user_input, file_ctx.as_deref(), event_tx)
                 .await;
             let _ = engine_tx.send(engine_owned);
         });
     }
 
     /// Poll for chat events from the streaming task.
-    /// Call this in the main event loop.
     pub fn poll_chat_events(&mut self) {
         if self.chat_event_rx.is_none() {
             return;
         }
 
-        // Drain all available events into a buffer to avoid borrow conflicts
         let mut events = Vec::new();
         let mut disconnected = false;
 
@@ -445,7 +606,6 @@ impl App {
             self.is_streaming = false;
             self.chat_event_rx = None;
 
-            // Try to recover the engine
             if let Some(mut rx) = self.engine_return_rx.take() {
                 if let Ok(engine) = rx.try_recv() {
                     self.engine = Some(engine);
@@ -457,7 +617,6 @@ impl App {
     fn process_chat_event(&mut self, event: ChatEvent) {
         match event {
             ChatEvent::StreamStart => {
-                // Ensure we have a streaming message
                 if self
                     .messages
                     .last()
@@ -495,7 +654,6 @@ impl App {
                 {
                     msg.content.push_str(&text);
                 }
-                // Keep scroll at bottom during streaming
                 self.scroll_offset = 0;
             }
             ChatEvent::ToolCallsUpdate(tool_calls) => {
@@ -560,10 +718,25 @@ impl App {
             }
             ChatEvent::TokenCount(tokens) => {
                 self.total_tokens += tokens;
+                self.check_token_limits();
             }
             ChatEvent::Error(msg) => {
                 self.system_message = Some(msg);
             }
+        }
+    }
+
+    /// Check token limits and show warning or auto-new-session.
+    fn check_token_limits(&mut self) {
+        if self.total_tokens >= TOKEN_LIMIT {
+            self.system_message =
+                Some("Token limit reached. Starting new session...".to_string());
+            self.new_session();
+        } else if self.total_tokens >= TOKEN_WARNING_THRESHOLD {
+            self.system_message = Some(
+                "Warning: Approaching token limit. Consider starting a new session with /new"
+                    .to_string(),
+            );
         }
     }
 
@@ -596,21 +769,8 @@ impl App {
                 self.overlay = Overlay::SessionList { selected: 0 };
             }
             CommandResult::Config => {
-                self.messages.push(DisplayMessage {
-                    role: MessageRole::System,
-                    content: format!(
-                        "Current config:\n  API Key: {}...{}\n  Model: {}\n  Theme: {}\n\nEdit ~/.minmax-code/config.json to change settings.",
-                        &self.config.api_key.chars().take(4).collect::<String>(),
-                        &self.config.api_key.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>(),
-                        self.config.model,
-                        self.config.theme,
-                    ),
-                    reasoning: None,
-                    tool_calls: Vec::new(),
-                    is_streaming: false,
-                    tool_status: None,
-                    tool_name: None,
-                });
+                self.config_menu_state = ConfigMenuState::new();
+                self.screen = AppScreen::ConfigMenu;
             }
             CommandResult::SetModel(model) => {
                 self.config.model = model.clone();
@@ -717,25 +877,15 @@ impl App {
 
         self.scroll_offset = 0;
     }
+
+    /// Check if the engine needs to be initialized (after API key is set).
+    pub fn needs_engine_init(&self) -> bool {
+        self.engine.is_none() && !self.config.api_key.is_empty() && self.screen == AppScreen::Chat
+    }
 }
 
-/// Items for the command palette.
-pub fn command_palette_items() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("/new", "Start a new session"),
-        ("/sessions", "Browse previous sessions"),
-        ("/model", "Change model"),
-        ("/theme", "Change theme"),
-        ("/config", "Show configuration"),
-        ("/init", "Create agent.md template"),
-        ("/clear", "Clear current chat"),
-        ("/exit", "Exit the terminal"),
-    ]
-}
-
-/// The main run loop. Sets up the terminal and runs the event loop.
+/// The main run loop.
 pub async fn run(config: AppConfig) -> Result<()> {
-    // Setup terminal
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(
         std::io::stdout(),
@@ -747,11 +897,16 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(config);
-    app.initialize()?;
+    app.initialize().await?;
 
     let result = event_loop(&mut terminal, &mut app).await;
 
-    // Restore terminal
+    // Shutdown MCP servers
+    if let Some(mcp) = &app.mcp_manager {
+        let mut manager = mcp.lock().await;
+        manager.shutdown().await;
+    }
+
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         std::io::stdout(),
@@ -768,7 +923,11 @@ async fn event_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        // Draw
+        // Check if engine needs initialization (after API key prompt)
+        if app.needs_engine_init() {
+            app.init_engine().await?;
+        }
+
         terminal.draw(|frame| {
             tui_layout::draw(frame, app);
         })?;
@@ -777,10 +936,8 @@ async fn event_loop(
             break;
         }
 
-        // Poll chat events from streaming
         app.poll_chat_events();
 
-        // Poll terminal events with a short timeout to keep UI responsive
         if crossterm::event::poll(Duration::from_millis(16))? {
             let event = event::read()?;
             app.handle_event(event);

@@ -2,8 +2,12 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use crate::config::themes::get_theme;
-use crate::tui::app::{App, Overlay};
+use crate::tui::api_key_prompt;
+use crate::tui::app::{App, AppScreen, Overlay};
 use crate::tui::chat_view;
+use crate::tui::command_palette;
+use crate::tui::config_menu;
+use crate::tui::file_picker;
 use crate::tui::header;
 use crate::tui::input;
 use crate::tui::status_bar;
@@ -11,6 +15,29 @@ use crate::tui::status_bar;
 /// Main draw function that renders the entire layout.
 pub fn draw(frame: &mut Frame, app: &App) {
     let theme = get_theme(app.theme_name());
+
+    match &app.screen {
+        AppScreen::ApiKeyPrompt => {
+            api_key_prompt::render(frame, frame.area(), &app.api_key_state, theme);
+        }
+        AppScreen::ConfigMenu => {
+            config_menu::render(
+                frame,
+                frame.area(),
+                &app.config_menu_state,
+                theme,
+                &app.config.api_key,
+                &app.config.theme,
+                &app.config.model,
+            );
+        }
+        AppScreen::Chat => {
+            draw_chat_screen(frame, app, theme);
+        }
+    }
+}
+
+fn draw_chat_screen(frame: &mut Frame, app: &App, theme: &crate::config::themes::Theme) {
     let area = frame.area();
 
     // Layout: Header(3) | Chat(flex) | SystemMsg?(1) | Input(3) | StatusBar(1)
@@ -18,17 +45,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let constraints = if has_system_msg {
         vec![
             Constraint::Length(3),  // Header
-            Constraint::Min(3),     // Chat area
-            Constraint::Length(1),  // System message
-            Constraint::Length(3),  // Input
-            Constraint::Length(1),  // Status bar
+            Constraint::Min(3),    // Chat area
+            Constraint::Length(1), // System message
+            Constraint::Length(3), // Input
+            Constraint::Length(1), // Status bar
         ]
     } else {
         vec![
             Constraint::Length(3),  // Header
-            Constraint::Min(3),     // Chat area
-            Constraint::Length(3),  // Input
-            Constraint::Length(1),  // Status bar
+            Constraint::Min(3),    // Chat area
+            Constraint::Length(3), // Input
+            Constraint::Length(1), // Status bar
         ]
     };
 
@@ -48,7 +75,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Draw system message if present
     if let (Some(area), Some(msg)) = (system_area, &app.system_message) {
-        let warning = Paragraph::new(format!(" ⚠ {}", msg))
+        let warning = Paragraph::new(format!(" \u{26a0} {}", msg))
             .style(Style::default().fg(Color::Rgb(
                 theme.warning.r,
                 theme.warning.g,
@@ -65,79 +92,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Draw overlays on top
     match &app.overlay {
-        Overlay::CommandPalette { selected } => {
-            draw_command_palette(frame, area, *selected, theme);
+        Overlay::CommandPalette => {
+            command_palette::render(
+                frame,
+                area,
+                &app.palette_state,
+                theme,
+                &app.config.theme,
+                &app.config.model,
+            );
+        }
+        Overlay::FilePicker => {
+            file_picker::render(frame, area, &app.file_picker_state, theme);
         }
         Overlay::SessionList { selected } => {
             draw_session_list(frame, area, app, *selected, theme);
         }
         Overlay::None => {}
     }
-}
-
-fn draw_command_palette(
-    frame: &mut Frame,
-    area: Rect,
-    selected: usize,
-    theme: &crate::config::themes::Theme,
-) {
-    let items = crate::tui::app::command_palette_items();
-    let palette_height = (items.len() as u16 + 3).min(area.height.saturating_sub(4));
-    let palette_width = 50.min(area.width.saturating_sub(4));
-    let x = (area.width.saturating_sub(palette_width)) / 2;
-    let y = (area.height.saturating_sub(palette_height)) / 2;
-    let palette_area = Rect::new(x, y, palette_width, palette_height);
-
-    // Clear area behind overlay
-    frame.render_widget(Clear, palette_area);
-
-    let list_items: Vec<ListItem> = items
-        .iter()
-        .enumerate()
-        .map(|(i, (cmd, desc))| {
-            let style = if i == selected {
-                Style::default()
-                    .fg(Color::Rgb(theme.bg.r, theme.bg.g, theme.bg.b))
-                    .bg(Color::Rgb(theme.accent.r, theme.accent.g, theme.accent.b))
-                    .bold()
-            } else {
-                Style::default().fg(Color::Rgb(theme.text.r, theme.text.g, theme.text.b))
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<12}", cmd), style),
-                Span::styled(
-                    format!(" {}", desc),
-                    if i == selected {
-                        style
-                    } else {
-                        Style::default().fg(Color::Rgb(
-                            theme.dim_text.r,
-                            theme.dim_text.g,
-                            theme.dim_text.b,
-                        ))
-                    },
-                ),
-            ]))
-        })
-        .collect();
-
-    let block = Block::default()
-        .title(" Commands ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(
-            theme.accent.r,
-            theme.accent.g,
-            theme.accent.b,
-        )))
-        .style(Style::default().bg(Color::Rgb(
-            theme.surface.r,
-            theme.surface.g,
-            theme.surface.b,
-        )));
-
-    let list = List::new(list_items).block(block);
-    frame.render_widget(list, palette_area);
 }
 
 fn draw_session_list(
@@ -149,7 +121,6 @@ fn draw_session_list(
 ) {
     let sessions = app.list_sessions();
     if sessions.is_empty() {
-        // Show empty message in a small overlay
         let h = 5u16;
         let w = 40u16.min(area.width.saturating_sub(4));
         let x = (area.width.saturating_sub(w)) / 2;
@@ -170,7 +141,7 @@ fn draw_session_list(
                 theme.surface.g,
                 theme.surface.b,
             )));
-        let para = Paragraph::new(" No sessions yet.")
+        let para = Paragraph::new(" No sessions yet. Press Esc to go back.")
             .style(Style::default().fg(Color::Rgb(
                 theme.dim_text.r,
                 theme.dim_text.g,
@@ -201,8 +172,10 @@ fn draw_session_list(
             } else {
                 Style::default().fg(Color::Rgb(theme.text.r, theme.text.g, theme.text.b))
             };
+            let indicator = if i == selected { "\u{25b8} " } else { "  " };
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {:<30}", name), style),
+                Span::styled(indicator, style),
+                Span::styled(format!("{:<30}", name), style),
                 Span::styled(
                     format!(" {}", model),
                     if i == selected {
@@ -220,7 +193,7 @@ fn draw_session_list(
         .collect();
 
     let block = Block::default()
-        .title(" Sessions ")
+        .title(format!(" Sessions ({}) ", sessions.len()))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Rgb(
