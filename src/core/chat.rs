@@ -36,8 +36,12 @@ pub enum ChatEvent {
     },
     /// Error during streaming or tool execution.
     Error(String),
-    /// Updated token count.
-    TokenCount(u64),
+    /// Updated token usage (prompt, completion, total).
+    TokenUsage {
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        total_tokens: u64,
+    },
 }
 
 /// The final assistant message after streaming completes.
@@ -232,7 +236,11 @@ impl ChatEngine {
                         StreamEvent::ReasoningChunk(c) => ChatEvent::ReasoningChunk(c),
                         StreamEvent::ContentChunk(c) => ChatEvent::ContentChunk(c),
                         StreamEvent::ToolCallDelta(tcs) => ChatEvent::ToolCallsUpdate(tcs),
-                        StreamEvent::Done(usage) => ChatEvent::TokenCount(usage.total_tokens),
+                        StreamEvent::Done(usage) => ChatEvent::TokenUsage {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                            total_tokens: usage.total_tokens,
+                        },
                         StreamEvent::Error(e) => ChatEvent::Error(e),
                     };
                     let _ = event_tx_clone.send(chat_evt);

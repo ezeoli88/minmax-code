@@ -11,24 +11,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         theme.dim_text.b,
     ));
 
-    // Left: Session name + quota
-    let mut left_parts = vec![format!("Session: {}", app.session_name)];
+    // Left: Session name
+    let left_text = format!(" Session: {}", app.session_name);
 
-    if let Some(quota) = &app.quota {
-        let pct = if quota.total > 0 {
-            (quota.remaining as f64 / quota.total as f64 * 100.0) as u64
-        } else {
-            0
-        };
-        left_parts.push(format!(
-            "Quota: {}/{} ({}% left) · Reset: {}m",
-            quota.used, quota.total, pct, quota.reset_minutes
-        ));
-    }
-    let left_text = format!(" {}", left_parts.join(" | "));
-
-    // Right: Token count + keybindings
-    let token_str = format_tokens(app.total_tokens);
+    // Right: Token usage + keybindings
+    let token_str = if app.total_tokens > 0 {
+        format!(
+            "↑{} ↓{} Σ{}",
+            format_tokens(app.prompt_tokens),
+            format_tokens(app.completion_tokens),
+            format_tokens(app.total_tokens),
+        )
+    } else {
+        "0".to_string()
+    };
     let right_text = format!(
         "Tokens: {} | /: cmds | Tab: mode | ↑↓: scroll ",
         token_str
