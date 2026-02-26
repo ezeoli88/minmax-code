@@ -16,6 +16,45 @@
       display: flex;
       flex-direction: column;
       align-items: center;
+      overflow-x: hidden;
+    }
+
+    .github-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #565f89;
+      text-decoration: none;
+      font-size: 0.95rem;
+      transition: color 0.15s;
+      animation: fadeInUp 0.8s ease 0.3s both;
+    }
+
+    .github-link:hover {
+      color: #7aa2f7;
+    }
+
+    .github-link svg {
+      fill: currentColor;
+      width: 20px;
+      height: 20px;
+    }
+
+    /* Starfield canvas */
+    #stars {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: -1;
+      pointer-events: none;
+    }
+
+    /* Hero entrance animations */
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(30px); }
+      to   { opacity: 1; transform: translateY(0); }
     }
 
     .hero {
@@ -29,6 +68,7 @@
       color: #7aa2f7;
       margin-bottom: 12px;
       letter-spacing: -1px;
+      animation: fadeInUp 0.8s ease both;
     }
 
     h1 span {
@@ -39,6 +79,7 @@
       font-size: 1.2rem;
       color: #565f89;
       margin-bottom: 48px;
+      animation: fadeInUp 0.8s ease 0.2s both;
     }
 
     .install-box {
@@ -49,6 +90,7 @@
       max-width: 620px;
       width: 100%;
       margin: 0 auto;
+      animation: fadeInUp 0.8s ease 0.4s both;
     }
 
     .os-tabs {
@@ -95,6 +137,29 @@
       white-space: nowrap;
     }
 
+    /* Typing cursor */
+    #commandText.typing::after {
+      content: '|';
+      color: #7aa2f7;
+      animation: blink 0.6s step-end infinite;
+      margin-left: 1px;
+    }
+
+    #commandText.cursor-fade::after {
+      content: '|';
+      color: #7aa2f7;
+      animation: blink 0.6s step-end infinite, cursorFadeOut 0.5s ease 1.5s both;
+      margin-left: 1px;
+    }
+
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+
+    @keyframes cursorFadeOut {
+      to { opacity: 0; }
+    }
+
     .copy-btn {
       position: absolute;
       top: 10px;
@@ -107,6 +172,11 @@
       color: #565f89;
       font-size: 0.8rem;
       transition: all 0.15s;
+    }
+
+    .copy-btn.hidden {
+      opacity: 0;
+      pointer-events: none;
     }
 
     .copy-btn:hover {
@@ -125,35 +195,80 @@
       margin-top: 12px;
     }
 
-    .demos {
+    /* Mode toggle */
+    .mode-toggle-section {
       max-width: 800px;
       width: 100%;
       padding: 32px 20px 0;
     }
 
-    .demo {
-      margin-bottom: 32px;
+    .mode-tabs {
+      display: flex;
+      gap: 0;
+      margin-bottom: 16px;
+      background: #16161e;
+      border-radius: 10px;
+      border: 1px solid #292e42;
+      overflow: hidden;
     }
 
-    .demo-label {
+    .mode-tab {
+      flex: 1;
+      padding: 14px 24px;
+      border: none;
+      background: transparent;
+      color: #565f89;
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-family: inherit;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      transition: all 0.2s;
+    }
+
+    .mode-tab:hover {
+      color: #a9b1d6;
+    }
+
+    .mode-tab.active {
+      background: #bb9af7;
+      color: #1a1b26;
+    }
+
+    .mode-description {
       font-size: 0.85rem;
       color: #565f89;
-      margin-bottom: 10px;
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
-      font-weight: 600;
+      text-align: center;
+      margin-bottom: 16px;
+      min-height: 1.5em;
+      transition: opacity 0.2s;
     }
 
-    .demo-label span {
-      color: #bb9af7;
-    }
-
-    .demo img {
+    .mode-image-wrapper {
+      position: relative;
       width: 100%;
       border-radius: 10px;
       border: 1px solid #292e42;
+      overflow: hidden;
+      background: #16161e;
     }
 
+    .mode-image-wrapper img {
+      width: 100%;
+      display: block;
+      transition: opacity 0.35s ease;
+    }
+
+    .mode-image-wrapper img.hidden {
+      position: absolute;
+      top: 0;
+      left: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    /* Features */
     .features {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -184,6 +299,39 @@
       line-height: 1.5;
     }
 
+    /* Stats counters */
+    .stats {
+      display: flex;
+      justify-content: center;
+      gap: 48px;
+      flex-wrap: wrap;
+      max-width: 700px;
+      padding: 16px 20px 48px;
+    }
+
+    .stat {
+      text-align: center;
+    }
+
+    .stat-number {
+      font-size: 2.4rem;
+      font-weight: 700;
+      color: #7aa2f7;
+      line-height: 1;
+    }
+
+    .stat-number .stat-suffix {
+      font-size: 1.4rem;
+      color: #bb9af7;
+    }
+
+    .stat-label {
+      font-size: 0.8rem;
+      color: #565f89;
+      margin-top: 6px;
+    }
+
+    /* Footer */
     .footer {
       padding: 32px 20px;
       color: #565f89;
@@ -202,9 +350,15 @@
 </head>
 <body>
 
+  <canvas id="stars"></canvas>
+
   <div class="hero">
     <h1>minmax<span>-code</span></h1>
     <p class="tagline">AI coding assistant in your terminal</p>
+    <a class="github-link" href="https://github.com/ezeoli88/minmax-code" target="_blank">
+      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
   </div>
 
   <div class="install-box">
@@ -214,20 +368,21 @@
       <button class="os-tab" data-os="windows">Windows</button>
     </div>
     <div class="command-block" id="command">
-      <button class="copy-btn" id="copyBtn" onclick="copyCommand()">Copy</button>
+      <button class="copy-btn hidden" id="copyBtn" onclick="copyCommand()">Copy</button>
       <code id="commandText"></code>
     </div>
     <p class="detected" id="detected"></p>
   </div>
 
-  <div class="demos">
-    <div class="demo">
-      <p class="demo-label"><span>PLAN</span> mode — read-only analysis</p>
-      <img src="cli-plan-mode.gif" alt="Plan mode demo" loading="lazy" />
+  <div class="mode-toggle-section">
+    <div class="mode-tabs">
+      <button class="mode-tab active" data-mode="plan">Plan mode</button>
+      <button class="mode-tab" data-mode="builder">Builder mode</button>
     </div>
-    <div class="demo">
-      <p class="demo-label"><span>BUILDER</span> mode — agentic execution</p>
-      <img src="cli-builder-mode.gif" alt="Builder mode demo" loading="lazy" />
+    <p class="mode-description" id="modeDescription">Read-only analysis — explore and understand your codebase safely</p>
+    <div class="mode-image-wrapper">
+      <img id="planImg" src="cli-plan-mode.gif" alt="Plan mode demo" loading="lazy" />
+      <img id="builderImg" class="hidden" src="cli-builder-mode.gif" alt="Builder mode demo" loading="lazy" />
     </div>
   </div>
 
@@ -247,19 +402,104 @@
       <h3>MiniMax powered</h3>
       <p>Fast reasoning with MiniMax-M2.5. Streaming responses.</p>
     </div>
+    <div class="feature">
+      <div class="feature-icon">&#128268;</div>
+      <h3>MCP support</h3>
+      <p>Connect external tool servers via Model Context Protocol.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">&#127912;</div>
+      <h3>Multiple themes</h3>
+      <p>Tokyo Night, Rosé Pine, Gruvbox. Switch with /theme.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">&#128190;</div>
+      <h3>Session persistence</h3>
+      <p>SQLite-backed history. Resume any previous conversation.</p>
+    </div>
   </div>
 
-  <div class="footer">
-    <a href="https://github.com/ezeoli88/minmax-code">GitHub</a>
+  <div class="stats" id="stats">
+    <div class="stat">
+      <div class="stat-number"><span class="stat-counter" data-target="8">0</span></div>
+      <div class="stat-label">Built-in tools</div>
+    </div>
+    <div class="stat">
+      <div class="stat-number"><span class="stat-counter" data-target="3">0</span></div>
+      <div class="stat-label">Themes</div>
+    </div>
+    <div class="stat">
+      <div class="stat-number">~<span class="stat-counter" data-target="100">0</span> <span class="stat-suffix">tps</span></div>
+      <div class="stat-label">Streaming speed</div>
+    </div>
+    <div class="stat">
+      <div class="stat-number"><span class="stat-counter" data-target="5">0</span></div>
+      <div class="stat-label">Platforms</div>
+    </div>
   </div>
+
+  <div class="footer"></div>
 
 <script>
+  // ── Starfield ──────────────────────────────────────────────────
+  (function() {
+    const canvas = document.getElementById('stars');
+    const ctx = canvas.getContext('2d');
+    let stars = [];
+    let animId;
+    let paused = false;
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+
+    function init() {
+      resize();
+      stars = [];
+      for (let i = 0; i < 120; i++) {
+        stars.push({
+          x: Math.random() * canvas.width,
+          y: Math.random() * canvas.height,
+          r: Math.random() * 1.2 + 0.3,
+          speed: Math.random() * 0.3 + 0.1,
+          opacity: Math.random() * 0.4 + 0.1
+        });
+      }
+    }
+
+    function draw() {
+      if (paused) { animId = requestAnimationFrame(draw); return; }
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (const s of stars) {
+        s.y -= s.speed;
+        if (s.y < -2) { s.y = canvas.height + 2; s.x = Math.random() * canvas.width; }
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(122, 162, 247, ${s.opacity})`;
+        ctx.fill();
+      }
+      animId = requestAnimationFrame(draw);
+    }
+
+    document.addEventListener('visibilitychange', () => { paused = document.hidden; });
+    window.addEventListener('resize', resize);
+    init();
+    draw();
+  })();
+
+  // ── Install commands & OS detection ────────────────────────────
   const REPO = 'ezeoli88/minmax-code';
   const commands = {
     mac:     `curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash`,
     linux:   `curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash`,
     windows: `irm https://raw.githubusercontent.com/${REPO}/main/install.ps1 | iex`,
   };
+
+  let currentOS = '';
+  let typeTimer = null;
+  const codeEl = document.getElementById('commandText');
+  const copyBtn = document.getElementById('copyBtn');
 
   function detectOS() {
     const ua = navigator.userAgent.toLowerCase();
@@ -268,19 +508,40 @@
     return 'linux';
   }
 
+  function typeCommand(text) {
+    // Clear any running animation
+    if (typeTimer) clearInterval(typeTimer);
+    codeEl.textContent = '';
+    codeEl.className = 'typing';
+    copyBtn.classList.add('hidden');
+
+    let i = 0;
+    typeTimer = setInterval(() => {
+      codeEl.textContent += text[i];
+      i++;
+      if (i >= text.length) {
+        clearInterval(typeTimer);
+        typeTimer = null;
+        // Switch to fading cursor, then show copy button
+        codeEl.className = 'cursor-fade';
+        copyBtn.classList.remove('hidden');
+        setTimeout(() => { codeEl.className = ''; }, 2000);
+      }
+    }, 30);
+  }
+
   function selectOS(os) {
+    currentOS = os;
     document.querySelectorAll('.os-tab').forEach(t => t.classList.remove('active'));
     document.querySelector(`[data-os="${os}"]`).classList.add('active');
-    document.getElementById('commandText').textContent = commands[os];
+    typeCommand(commands[os]);
   }
 
   function copyCommand() {
-    const text = document.getElementById('commandText').textContent;
-    navigator.clipboard.writeText(text);
-    const btn = document.getElementById('copyBtn');
-    btn.textContent = 'Copied!';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+    navigator.clipboard.writeText(commands[currentOS]);
+    copyBtn.textContent = 'Copied!';
+    copyBtn.classList.add('copied');
+    setTimeout(() => { copyBtn.textContent = 'Copy'; copyBtn.classList.remove('copied'); }, 2000);
   }
 
   document.querySelectorAll('.os-tab').forEach(tab => {
@@ -291,6 +552,64 @@
   selectOS(detected);
   const osNames = { mac: 'macOS', linux: 'Linux', windows: 'Windows' };
   document.getElementById('detected').textContent = `Detected: ${osNames[detected]}`;
+
+  // ── Plan / Builder mode toggle ─────────────────────────────────
+  const modeDescriptions = {
+    plan: 'Read-only analysis — explore and understand your codebase safely',
+    builder: 'Agentic execution — edit files, run commands, and build features'
+  };
+
+  const planImg = document.getElementById('planImg');
+  const builderImg = document.getElementById('builderImg');
+  const modeDesc = document.getElementById('modeDescription');
+
+  document.querySelectorAll('.mode-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const mode = tab.dataset.mode;
+      modeDesc.textContent = modeDescriptions[mode];
+
+      if (mode === 'plan') {
+        planImg.classList.remove('hidden');
+        builderImg.classList.add('hidden');
+      } else {
+        builderImg.classList.remove('hidden');
+        planImg.classList.add('hidden');
+      }
+    });
+  });
+
+  // ── Stats counter animation ────────────────────────────────────
+  function animateCounters() {
+    document.querySelectorAll('.stat-counter').forEach(el => {
+      const target = parseInt(el.dataset.target);
+      const duration = 1500;
+      const start = performance.now();
+
+      function update(now) {
+        const elapsed = now - start;
+        const progress = Math.min(elapsed / duration, 1);
+        // easeOutCubic
+        const eased = 1 - Math.pow(1 - progress, 3);
+        el.textContent = Math.round(eased * target);
+        if (progress < 1) requestAnimationFrame(update);
+      }
+      requestAnimationFrame(update);
+    });
+  }
+
+  // Trigger on scroll into view
+  const statsSection = document.getElementById('stats');
+  let statsAnimated = false;
+  const statsObserver = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting && !statsAnimated) {
+      statsAnimated = true;
+      animateCounters();
+      statsObserver.disconnect();
+    }
+  }, { threshold: 0.3 });
+  statsObserver.observe(statsSection);
 </script>
 
 </body>
