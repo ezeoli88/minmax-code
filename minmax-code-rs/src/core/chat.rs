@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::api::{AccumulatedToolCall, MiniMaxClient, StreamEvent};
+use crate::core::mcp::McpManager;
 use crate::core::parser::{coerce_arg, parse_model_output};
 use crate::core::session::SessionStore;
 use crate::core::Mode;
@@ -70,6 +71,7 @@ pub struct ChatEngine {
     session_store: Option<Arc<SessionStore>>,
     total_tokens: u64,
     cancel_token: CancellationToken,
+    mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
 }
 
 impl ChatEngine {
@@ -83,7 +85,12 @@ impl ChatEngine {
             session_store: None,
             total_tokens: 0,
             cancel_token: CancellationToken::new(),
+            mcp_manager: None,
         }
+    }
+
+    pub fn set_mcp_manager(&mut self, manager: Arc<tokio::sync::Mutex<McpManager>>) {
+        self.mcp_manager = Some(manager);
     }
 
     pub fn set_session(&mut self, session_id: String, store: Arc<SessionStore>) {
@@ -202,7 +209,13 @@ impl ChatEngine {
 
             let _ = event_tx.send(ChatEvent::StreamStart);
 
-            let tool_defs = tools::get_tool_definitions(self.mode);
+            let mut tool_defs = tools::get_tool_definitions(self.mode);
+            // Append MCP tool definitions if available
+            if let Some(mcp) = &self.mcp_manager {
+                if let Ok(manager) = mcp.try_lock() {
+                    tool_defs.extend(manager.get_tool_definitions());
+                }
+            }
             let full_history = self.build_full_history();
 
             // Create a channel for stream events
@@ -371,9 +384,27 @@ impl ChatEngine {
                     let name = tc.function.name.clone();
                     let args = parsed_args[i].clone();
                     let mode = self.mode;
+                    let mcp = self.mcp_manager.clone();
 
                     handles.push(tokio::spawn(async move {
-                        tools::execute_tool(&name, args, mode).await
+                        // Route MCP tools to the MCP manager
+                        if name.starts_with("mcp__") {
+                            if let Some(mcp) = mcp {
+                                let manager = mcp.lock().await;
+                                match manager.call_tool(&name, args).await {
+                                    Ok(result) => tools::ToolExecutionResult::text(result),
+                                    Err(e) => tools::ToolExecutionResult::text(
+                                        format!("Error: MCP tool failed: {}", e),
+                                    ),
+                                }
+                            } else {
+                                tools::ToolExecutionResult::text(
+                                    format!("Error: MCP tool \"{}\" called but no MCP manager available", name),
+                                )
+                            }
+                        } else {
+                            tools::execute_tool(&name, args, mode).await
+                        }
                     }));
                 }
 

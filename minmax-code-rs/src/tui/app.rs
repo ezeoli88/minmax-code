@@ -188,7 +188,9 @@ impl App {
                     tools.join(", ")
                 ));
             }
-            self.mcp_manager = Some(Arc::new(tokio::sync::Mutex::new(mcp_manager)));
+            let mcp_arc = Arc::new(tokio::sync::Mutex::new(mcp_manager));
+            engine.set_mcp_manager(mcp_arc.clone());
+            self.mcp_manager = Some(mcp_arc);
         }
 
         self.engine = Some(engine);
