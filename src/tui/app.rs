@@ -363,12 +363,13 @@ impl App {
                     self.palette_state = CommandPaletteState::new();
                     self.overlay = Overlay::CommandPalette;
                 }
-                // Check for '@' at start → open file picker
-                else if c == '@' && self.input_cursor == 1 && self.input_text.len() == 1 {
+                // Check for '@' → open file picker
+                else if c == '@' {
                     self.file_picker_state = FilePickerState::new();
                     self.overlay = Overlay::FilePicker;
-                    self.input_text.remove(self.input_cursor - 1);
+                    // Remove the '@' we just inserted
                     self.input_cursor -= 1;
+                    self.input_text.remove(self.input_cursor);
                 }
             }
             KeyCode::Backspace => {

@@ -147,6 +147,7 @@ impl MiniMaxClient {
             "model": model,
             "messages": messages,
             "stream": true,
+            "stream_options": { "include_usage": true },
             "temperature": 1.0,
         });
 
