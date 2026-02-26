@@ -1,0 +1,59 @@
+[package]
+name = "minmax-code"
+version = "0.1.0"
+edition = "2021"
+description = "AI-powered terminal coding assistant for MiniMax models"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = "0.3"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI arguments
+clap = { version = "4", features = ["derive"] }
+
+# HTTP + SSE streaming
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"] }
+reqwest-eventsource = "0.6"
+
+# XML/regex parsing
+regex = "1"
+
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Filesystem
+dirs = "6"
+globset = "0.4"
+walkdir = "2"
+
+# Search (ripgrep engine)
+grep-regex = "0.1"
+grep-searcher = "0.1"
+grep-matcher = "0.1"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
