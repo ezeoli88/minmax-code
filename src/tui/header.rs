@@ -64,7 +64,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     let mode_label = match app.mode {
         Mode::Plan => "[PLAN]",
-        Mode::Builder => "[BUILD]",
+        Mode::Builder => "[BUILDER]",
     };
     let right_span = Span::styled(mode_label, Style::default().fg(mode_color).bold());
 
