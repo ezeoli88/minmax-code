@@ -1,3 +1,4 @@
+pub mod agent_question;
 pub mod api_key_prompt;
 pub mod app;
 pub mod chat_view;

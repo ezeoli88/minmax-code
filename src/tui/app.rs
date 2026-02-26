@@ -8,11 +8,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::settings::{save_config, AppConfig};
 use crate::core::api::{AccumulatedToolCall, MiniMaxClient, QuotaInfo};
-use crate::core::chat::{ChatEngine, ChatEvent};
+use crate::core::chat::{ChatEngine, ChatEvent, ResponseChannel};
 use crate::core::commands::{handle_command, CommandResult};
 use crate::core::mcp::McpManager;
 use crate::core::session::SessionStore;
 use crate::core::Mode;
+use crate::tui::agent_question::{self, AgentQuestionState, QuestionAction};
 use crate::tui::api_key_prompt::{self, ApiKeyAction, ApiKeyPromptState};
 use crate::tui::command_palette::{self, CommandPaletteState, PaletteAction};
 use crate::tui::config_menu::{self, ConfigAction, ConfigMenuState};
@@ -78,6 +79,7 @@ pub enum Overlay {
     CommandPalette,
     FilePicker,
     SessionList { selected: usize },
+    AgentQuestion,
 }
 
 // ── Application state ───────────────────────────────────────────────────
@@ -107,8 +109,10 @@ pub struct App {
     pub file_picker_state: FilePickerState,
     pub config_menu_state: ConfigMenuState,
     pub api_key_state: ApiKeyPromptState,
+    pub agent_question_state: Option<AgentQuestionState>,
 
     // Internal
+    agent_question_tx: Option<ResponseChannel>,
     engine: Option<ChatEngine>,
     session_store: Option<Arc<SessionStore>>,
     session_id: Option<String>,
@@ -153,6 +157,8 @@ impl App {
             file_picker_state: FilePickerState::new(),
             config_menu_state: ConfigMenuState::new(),
             api_key_state: ApiKeyPromptState::new(),
+            agent_question_state: None,
+            agent_question_tx: None,
             engine: None,
             session_store: None,
             session_id: None,
@@ -515,6 +521,27 @@ impl App {
                     _ => {}
                 }
             }
+            Overlay::AgentQuestion => {
+                if let Some(ref mut state) = self.agent_question_state {
+                    let action = agent_question::handle_key(state, key);
+                    match action {
+                        QuestionAction::Answer(answer) => {
+                            // Send the answer back to the engine
+                            if let Some(tx_channel) = self.agent_question_tx.take() {
+                                if let Ok(mut guard) = tx_channel.0.lock() {
+                                    if let Some(tx) = guard.take() {
+                                        let _ = tx.send(answer);
+                                    }
+                                }
+                            }
+                            // Close the overlay
+                            self.overlay = Overlay::None;
+                            self.agent_question_state = None;
+                        }
+                        QuestionAction::None => {}
+                    }
+                }
+            }
             Overlay::None => {}
         }
     }
@@ -546,6 +573,12 @@ impl App {
         self.cancel_token.cancel();
         self.is_streaming = false;
         self.cancel_token = CancellationToken::new();
+        // Clean up agent question overlay if open
+        if self.overlay == Overlay::AgentQuestion {
+            self.overlay = Overlay::None;
+            self.agent_question_state = None;
+            self.agent_question_tx = None;
+        }
     }
 
     fn submit_input(&mut self) {
@@ -887,6 +920,16 @@ impl App {
             }
             ChatEvent::Error(msg) => {
                 self.set_system_message(msg);
+            }
+            ChatEvent::AskUser {
+                question,
+                response_tx,
+            } => {
+                // Store the response sender so we can send back the answer
+                self.agent_question_tx = Some(response_tx);
+                // Create the overlay state and show it
+                self.agent_question_state = Some(AgentQuestionState::new(question));
+                self.overlay = Overlay::AgentQuestion;
             }
         }
     }

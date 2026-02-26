@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use crate::config::themes::get_theme;
+use crate::tui::agent_question;
 use crate::tui::api_key_prompt;
 use crate::tui::app::{App, AppScreen, Overlay, SystemMessageType};
 use crate::tui::chat_view;
@@ -107,6 +108,11 @@ fn draw_chat_screen(frame: &mut Frame, app: &App, theme: &crate::config::themes:
         }
         Overlay::SessionList { selected } => {
             draw_session_list(frame, area, app, *selected, theme);
+        }
+        Overlay::AgentQuestion => {
+            if let Some(ref state) = app.agent_question_state {
+                agent_question::render(frame, area, state, theme);
+            }
         }
         Overlay::None => {}
     }

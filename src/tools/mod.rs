@@ -1,3 +1,4 @@
+pub mod ask_user;
 pub mod bash;
 pub mod edit_file;
 pub mod glob;
@@ -54,6 +55,7 @@ static READ_ONLY_TOOLS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     s.insert("grep");
     s.insert("list_directory");
     s.insert("web_search");
+    s.insert("ask_user");
     s
 });
 
@@ -68,6 +70,7 @@ pub fn get_tool_definitions(mode: Mode) -> Vec<Value> {
         grep::definition(),
         list_dir::definition(),
         web_search::definition(),
+        ask_user::definition(),
     ];
 
     match mode {
