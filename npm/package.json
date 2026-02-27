@@ -1,0 +1,46 @@
+{
+  "name": "minmax-code",
+  "version": "0.1.0",
+  "description": "Terminal-native AI coding assistant powered by MiniMax LLM",
+  "bin": {
+    "minmax-code": "./run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "run.js",
+    "bin/"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "ai",
+    "coding-assistant",
+    "terminal",
+    "tui",
+    "minimax",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ezeoli88/minmax-code.git"
+  },
+  "homepage": "https://github.com/ezeoli88/minmax-code",
+  "bugs": {
+    "url": "https://github.com/ezeoli88/minmax-code/issues"
+  },
+  "license": "MIT",
+  "author": "ezeoli88",
+  "engines": {
+    "node": ">=16"
+  }
+}
