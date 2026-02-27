@@ -8,11 +8,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::settings::{save_config, AppConfig};
 use crate::core::api::{AccumulatedToolCall, MiniMaxClient, QuotaInfo};
-use crate::core::chat::{ChatEngine, ChatEvent};
+use crate::core::chat::{ChatEngine, ChatEvent, ResponseChannel, TodoItem};
 use crate::core::commands::{handle_command, CommandResult};
 use crate::core::mcp::McpManager;
 use crate::core::session::SessionStore;
 use crate::core::Mode;
+use crate::tui::agent_question::{self, AgentQuestionState, QuestionAction};
 use crate::tui::api_key_prompt::{self, ApiKeyAction, ApiKeyPromptState};
 use crate::tui::command_palette::{self, CommandPaletteState, PaletteAction};
 use crate::tui::config_menu::{self, ConfigAction, ConfigMenuState};
@@ -78,6 +79,7 @@ pub enum Overlay {
     CommandPalette,
     FilePicker,
     SessionList { selected: usize },
+    AgentQuestion,
 }
 
 // ── Application state ───────────────────────────────────────────────────
@@ -107,8 +109,11 @@ pub struct App {
     pub file_picker_state: FilePickerState,
     pub config_menu_state: ConfigMenuState,
     pub api_key_state: ApiKeyPromptState,
+    pub agent_question_state: Option<AgentQuestionState>,
+    pub todo_items: Vec<TodoItem>,
 
     // Internal
+    agent_question_tx: Option<ResponseChannel>,
     engine: Option<ChatEngine>,
     session_store: Option<Arc<SessionStore>>,
     session_id: Option<String>,
@@ -153,6 +158,9 @@ impl App {
             file_picker_state: FilePickerState::new(),
             config_menu_state: ConfigMenuState::new(),
             api_key_state: ApiKeyPromptState::new(),
+            agent_question_state: None,
+            todo_items: Vec::new(),
+            agent_question_tx: None,
             engine: None,
             session_store: None,
             session_id: None,
@@ -515,6 +523,27 @@ impl App {
                     _ => {}
                 }
             }
+            Overlay::AgentQuestion => {
+                if let Some(ref mut state) = self.agent_question_state {
+                    let action = agent_question::handle_key(state, key);
+                    match action {
+                        QuestionAction::Answer(answer) => {
+                            // Send the answer back to the engine
+                            if let Some(tx_channel) = self.agent_question_tx.take() {
+                                if let Ok(mut guard) = tx_channel.0.lock() {
+                                    if let Some(tx) = guard.take() {
+                                        let _ = tx.send(answer);
+                                    }
+                                }
+                            }
+                            // Close the overlay
+                            self.overlay = Overlay::None;
+                            self.agent_question_state = None;
+                        }
+                        QuestionAction::None => {}
+                    }
+                }
+            }
             Overlay::None => {}
         }
     }
@@ -546,6 +575,12 @@ impl App {
         self.cancel_token.cancel();
         self.is_streaming = false;
         self.cancel_token = CancellationToken::new();
+        // Clean up agent question overlay if open
+        if self.overlay == Overlay::AgentQuestion {
+            self.overlay = Overlay::None;
+            self.agent_question_state = None;
+            self.agent_question_tx = None;
+        }
     }
 
     fn submit_input(&mut self) {
@@ -628,42 +663,54 @@ impl App {
 
     /// Poll for chat events from the streaming task.
     pub fn poll_chat_events(&mut self) {
-        if self.chat_event_rx.is_none() {
-            return;
-        }
+        // Drain any pending chat events
+        if self.chat_event_rx.is_some() {
+            let mut events = Vec::new();
+            let mut disconnected = false;
 
-        let mut events = Vec::new();
-        let mut disconnected = false;
-
-        if let Some(rx) = &mut self.chat_event_rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(event) => events.push(event),
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
+            if let Some(rx) = &mut self.chat_event_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(event) => events.push(event),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        for event in events {
-            self.process_chat_event(event);
-        }
-
-        if disconnected {
-            self.is_streaming = false;
-            self.chat_event_rx = None;
-
-            if let Some(mut rx) = self.engine_return_rx.take() {
-                if let Ok(engine) = rx.try_recv() {
-                    self.engine = Some(engine);
-                }
+            for event in events {
+                self.process_chat_event(event);
             }
 
-            // Refresh quota in background after streaming completes
-            self.start_quota_refresh();
+            if disconnected {
+                self.is_streaming = false;
+                self.chat_event_rx = None;
+                // Refresh quota in background after streaming completes
+                self.start_quota_refresh();
+            }
+        }
+
+        // Try to recover the engine from the spawned task.
+        // This runs every tick so we catch the engine even if the event
+        // channel disconnected before the engine oneshot was sent.
+        if self.engine.is_none() {
+            if let Some(mut rx) = self.engine_return_rx.take() {
+                match rx.try_recv() {
+                    Ok(engine) => {
+                        self.engine = Some(engine);
+                    }
+                    Err(oneshot::error::TryRecvError::Empty) => {
+                        // Engine hasn't been returned yet — put receiver back, retry next tick.
+                        self.engine_return_rx = Some(rx);
+                    }
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        // Sender was dropped without sending — engine is lost.
+                    }
+                }
+            }
         }
     }
 
@@ -721,36 +768,50 @@ impl App {
     }
 
     /// Poll for a completed background update check.
+    /// Shows the update notification once at startup, then never again.
     pub fn poll_update_check(&mut self) {
         if let Some(mut rx) = self.update_check_rx.take() {
             match rx.try_recv() {
                 Ok(Some(version)) => {
-                    let msg = if cfg!(target_os = "windows") {
-                        format!(
-                            "New version v{} available! Run: irm https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.ps1 | iex",
-                            version
-                        )
-                    } else {
-                        format!(
-                            "New version v{} available! Run: curl -fsSL https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.sh | sh",
-                            version
-                        )
-                    };
-                    self.system_message = Some(msg);
-                    self.system_message_type = SystemMessageType::Update;
-                    self.system_message_expires_at =
-                        Some(Instant::now() + Duration::from_secs(SYSTEM_MESSAGE_TTL_SECONDS));
+                    // Only show the update message if no other system message is active
+                    // (e.g., MCP connection info, errors). The update_check_rx is consumed
+                    // either way so this notification only fires once per session.
+                    if self.system_message.is_none() {
+                        let msg = if cfg!(target_os = "windows") {
+                            format!(
+                                "New version v{} available! Run: irm https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.ps1 | iex",
+                                version
+                            )
+                        } else {
+                            format!(
+                                "New version v{} available! Run: curl -fsSL https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.sh | sh",
+                                version
+                            )
+                        };
+                        self.system_message = Some(msg);
+                        self.system_message_type = SystemMessageType::Update;
+                        self.system_message_expires_at =
+                            Some(Instant::now() + Duration::from_secs(SYSTEM_MESSAGE_TTL_SECONDS));
+                    }
+                    // Do NOT put rx back — update check is consumed, won't show again.
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    // No update available — done.
+                }
                 Err(oneshot::error::TryRecvError::Empty) => {
+                    // Result not ready yet — put it back to retry next tick.
                     self.update_check_rx = Some(rx);
                 }
-                Err(_) => {}
+                Err(_) => {
+                    // Channel closed — done.
+                }
             }
         }
     }
 
     fn set_system_message(&mut self, msg: impl Into<String>) {
+        // Warnings/errors always take priority and overwrite any current message
+        // (including update notifications).
         self.system_message = Some(msg.into());
         self.system_message_type = SystemMessageType::Warning;
         self.system_message_expires_at =
@@ -888,6 +949,19 @@ impl App {
             ChatEvent::Error(msg) => {
                 self.set_system_message(msg);
             }
+            ChatEvent::TodoUpdate(items) => {
+                self.todo_items = items;
+            }
+            ChatEvent::AskUser {
+                question,
+                response_tx,
+            } => {
+                // Store the response sender so we can send back the answer
+                self.agent_question_tx = Some(response_tx);
+                // Create the overlay state and show it
+                self.agent_question_state = Some(AgentQuestionState::new(question));
+                self.overlay = Overlay::AgentQuestion;
+            }
         }
     }
 
@@ -954,6 +1028,7 @@ impl App {
 
     fn new_session(&mut self) {
         self.messages.clear();
+        self.todo_items.clear();
         self.total_tokens = 0;
         self.prompt_tokens = 0;
         self.completion_tokens = 0;

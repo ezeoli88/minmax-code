@@ -1,3 +1,4 @@
+pub mod agent_question;
 pub mod api_key_prompt;
 pub mod app;
 pub mod chat_view;
@@ -9,4 +10,5 @@ pub mod input;
 pub mod layout;
 pub mod markdown;
 pub mod status_bar;
+pub mod todo_panel;
 pub mod tool_view;

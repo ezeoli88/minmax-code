@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::Value;
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::api::{AccumulatedToolCall, MiniMaxClient, StreamEvent};
@@ -10,6 +10,43 @@ use crate::core::parser::{coerce_arg, parse_model_output};
 use crate::core::session::SessionStore;
 use crate::core::Mode;
 use crate::tools;
+
+// ── Agent Question types ─────────────────────────────────────────────────
+
+/// A question the agent wants to ask the user interactively.
+#[derive(Debug, Clone)]
+pub struct AgentQuestion {
+    pub question: String,
+    pub options: Vec<String>,
+    pub allow_custom: bool,
+}
+
+/// Wrapper around the response channel that implements Debug and Clone.
+#[derive(Clone)]
+pub struct ResponseChannel(pub Arc<Mutex<Option<oneshot::Sender<String>>>>);
+
+impl std::fmt::Debug for ResponseChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ResponseChannel(..)")
+    }
+}
+
+// ── Todo types ───────────────────────────────────────────────────────────
+
+/// Status of a todo item.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// A single todo item in the task list.
+#[derive(Debug, Clone)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+}
 
 // ── Chat Events (for UI consumption) ────────────────────────────────────
 
@@ -42,6 +79,13 @@ pub enum ChatEvent {
         completion_tokens: u64,
         total_tokens: u64,
     },
+    /// The agent needs to ask the user a question interactively.
+    AskUser {
+        question: AgentQuestion,
+        response_tx: ResponseChannel,
+    },
+    /// The agent updated the todo/task list.
+    TodoUpdate(Vec<TodoItem>),
 }
 
 /// The final assistant message after streaming completes.
@@ -139,9 +183,11 @@ impl ChatEngine {
             Mode::Plan => format!(
                 "You are a coding assistant in a terminal (READ-ONLY mode).\n\
                 Working directory: {}\n\n\
-                Available tools: read_file, glob, grep, list_directory, web_search (read-only).\n\
+                Available tools: read_file, glob, grep, list_directory, web_search (read-only), ask_user, todo_write.\n\
                 You CANNOT write, edit, or run commands. Tell the user to switch to BUILDER mode (Tab) for modifications.\n\
-                Focus on: analysis, planning, explaining code, suggesting strategies.",
+                Focus on: analysis, planning, explaining code, suggesting strategies.\n\
+                Use ask_user to ask the user clarifying questions when you need more information to proceed.\n\
+                Use todo_write to create a task list when you have a plan ready, tracking progress on multi-step work.",
                 cwd
             ),
             Mode::Builder => format!(
@@ -153,6 +199,8 @@ impl ChatEngine {
                 - Use glob/grep to find files before reading them\n\
                 - Use bash for git, npm, and other CLI operations\n\
                 - Use web_search for current information, docs, or answers not in local files\n\
+                - Use ask_user when you need user clarification, confirmation, or to let the user choose between alternatives\n\
+                - Use todo_write to create and update a task list when working on multi-step tasks\n\
                 - Execute one logical step at a time, verify results, then proceed\n\n\
                 Be concise. Show relevant code, skip obvious explanations.",
                 cwd
@@ -399,9 +447,148 @@ impl ChatEngine {
                     })
                     .collect();
 
-                // Execute tools in parallel, emitting events as each completes
-                let mut handles = Vec::new();
+                // Pre-allocate results indexed by position
+                let tool_count = final_tool_calls.len();
+                let mut results: Vec<Option<(String, String, tools::ToolExecutionResult)>> =
+                    (0..tool_count).map(|_| None).collect();
+
+                // Separate intercepted tools (ask_user, todo_write) from regular tools
+                let mut regular_indices: Vec<usize> = Vec::new();
+
                 for (i, tc) in final_tool_calls.iter().enumerate() {
+                    if tc.function.name == "todo_write" {
+                        // Handle todo_write: parse items and send update to UI
+                        let args = &parsed_args[i];
+                        let items: Vec<TodoItem> = args
+                            .get("todos")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|item| {
+                                        let content = item.get("content")?.as_str()?.to_string();
+                                        let status = match item
+                                            .get("status")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("pending")
+                                        {
+                                            "in_progress" => TodoStatus::InProgress,
+                                            "completed" => TodoStatus::Completed,
+                                            _ => TodoStatus::Pending,
+                                        };
+                                        Some(TodoItem { content, status })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let item_count = items.len();
+                        let completed = items
+                            .iter()
+                            .filter(|t| t.status == TodoStatus::Completed)
+                            .count();
+
+                        let _ = event_tx.send(ChatEvent::ToolExecutionStart {
+                            id: tc.id.clone(),
+                            name: "todo_write".to_string(),
+                        });
+
+                        // Send the todo update to the UI
+                        let _ = event_tx.send(ChatEvent::TodoUpdate(items));
+
+                        let result_msg = format!(
+                            "Todo list updated ({}/{} completed)",
+                            completed, item_count
+                        );
+
+                        let _ = event_tx.send(ChatEvent::ToolExecutionDone {
+                            id: tc.id.clone(),
+                            name: "todo_write".to_string(),
+                            result: result_msg.clone(),
+                        });
+
+                        results[i] = Some((
+                            tc.id.clone(),
+                            tc.function.name.clone(),
+                            tools::ToolExecutionResult::text(result_msg),
+                        ));
+                    } else if tc.function.name == "ask_user" {
+                        // Handle ask_user synchronously
+                        let args = &parsed_args[i];
+                        let question_text = args
+                            .get("question")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("What would you like to do?")
+                            .to_string();
+                        let options: Vec<String> = args
+                            .get("options")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let allow_custom = args
+                            .get("allow_custom")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+
+                        let question = AgentQuestion {
+                            question: question_text,
+                            options,
+                            allow_custom,
+                        };
+
+                        // Create oneshot channel for the response
+                        let (resp_tx, resp_rx) = oneshot::channel::<String>();
+
+                        let _ = event_tx.send(ChatEvent::ToolExecutionStart {
+                            id: tc.id.clone(),
+                            name: "ask_user".to_string(),
+                        });
+
+                        // Send the question to the UI
+                        let _ = event_tx.send(ChatEvent::AskUser {
+                            question,
+                            response_tx: ResponseChannel(Arc::new(Mutex::new(Some(resp_tx)))),
+                        });
+
+                        // Wait for the user's response (blocks this task)
+                        let user_answer = tokio::select! {
+                            result = resp_rx => {
+                                match result {
+                                    Ok(answer) => answer,
+                                    Err(_) => "No response (cancelled)".to_string(),
+                                }
+                            }
+                            _ = self.cancel_token.cancelled() => {
+                                "Cancelled by user".to_string()
+                            }
+                        };
+
+                        let _ = event_tx.send(ChatEvent::ToolExecutionDone {
+                            id: tc.id.clone(),
+                            name: "ask_user".to_string(),
+                            result: user_answer.clone(),
+                        });
+
+                        results[i] = Some((
+                            tc.id.clone(),
+                            tc.function.name.clone(),
+                            tools::ToolExecutionResult::text(format!(
+                                "User responded: {}",
+                                user_answer
+                            )),
+                        ));
+                    } else {
+                        regular_indices.push(i);
+                    }
+                }
+
+                // Execute remaining regular tools in parallel
+                let mut handles: Vec<(usize, tokio::task::JoinHandle<(String, String, tools::ToolExecutionResult)>)> = Vec::new();
+                for idx in regular_indices {
+                    let tc = &final_tool_calls[idx];
                     let _ = event_tx.send(ChatEvent::ToolExecutionStart {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
@@ -409,13 +596,13 @@ impl ChatEngine {
 
                     let name = tc.function.name.clone();
                     let id = tc.id.clone();
-                    let args = parsed_args[i].clone();
+                    let args = parsed_args[idx].clone();
                     let mode = self.mode;
                     let mcp = self.mcp_manager.clone();
                     let tx = event_tx.clone();
                     let cancel = self.cancel_token.clone();
 
-                    handles.push(tokio::spawn(async move {
+                    handles.push((idx, tokio::spawn(async move {
                         if cancel.is_cancelled() {
                             let result = tools::ToolExecutionResult::text("Cancelled".to_string());
                             let _ = tx.send(ChatEvent::ToolExecutionDone {
@@ -452,12 +639,11 @@ impl ChatEngine {
                         });
 
                         (id, name, result)
-                    }));
+                    })));
                 }
 
-                // Collect results (order preserved for history)
-                let mut results = Vec::new();
-                for handle in handles {
+                // Collect parallel results
+                for (idx, handle) in handles {
                     let (id, name, result) = match handle.await {
                         Ok(r) => r,
                         Err(e) => {
@@ -465,11 +651,27 @@ impl ChatEngine {
                             (String::new(), String::new(), err_result)
                         }
                     };
-                    results.push((id, name, result));
+                    results[idx] = Some((id, name, result));
                 }
 
+                // Flatten results in original order
+                let ordered_results: Vec<(String, String, tools::ToolExecutionResult)> = results
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        r.unwrap_or_else(|| {
+                            let tc = &final_tool_calls[i];
+                            (
+                                tc.id.clone(),
+                                tc.function.name.clone(),
+                                tools::ToolExecutionResult::text("Error: tool result missing".to_string()),
+                            )
+                        })
+                    })
+                    .collect();
+
                 // Update history for each tool result
-                for (id, _name, result) in &results {
+                for (id, _name, result) in &ordered_results {
                     self.history.push(serde_json::json!({
                         "role": "tool",
                         "content": result.result,
@@ -479,7 +681,7 @@ impl ChatEngine {
 
                 // Persist all tool messages
                 for (i, tc) in final_tool_calls.iter().enumerate() {
-                    if let Some((_, _, result)) = results.get(i) {
+                    if let Some((_, _, result)) = ordered_results.get(i) {
                         self.persist_message(
                             "tool",
                             &result.result,
