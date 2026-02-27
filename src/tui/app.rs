@@ -663,42 +663,54 @@ impl App {
 
     /// Poll for chat events from the streaming task.
     pub fn poll_chat_events(&mut self) {
-        if self.chat_event_rx.is_none() {
-            return;
-        }
+        // Drain any pending chat events
+        if self.chat_event_rx.is_some() {
+            let mut events = Vec::new();
+            let mut disconnected = false;
 
-        let mut events = Vec::new();
-        let mut disconnected = false;
-
-        if let Some(rx) = &mut self.chat_event_rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(event) => events.push(event),
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
+            if let Some(rx) = &mut self.chat_event_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(event) => events.push(event),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        for event in events {
-            self.process_chat_event(event);
-        }
-
-        if disconnected {
-            self.is_streaming = false;
-            self.chat_event_rx = None;
-
-            if let Some(mut rx) = self.engine_return_rx.take() {
-                if let Ok(engine) = rx.try_recv() {
-                    self.engine = Some(engine);
-                }
+            for event in events {
+                self.process_chat_event(event);
             }
 
-            // Refresh quota in background after streaming completes
-            self.start_quota_refresh();
+            if disconnected {
+                self.is_streaming = false;
+                self.chat_event_rx = None;
+                // Refresh quota in background after streaming completes
+                self.start_quota_refresh();
+            }
+        }
+
+        // Try to recover the engine from the spawned task.
+        // This runs every tick so we catch the engine even if the event
+        // channel disconnected before the engine oneshot was sent.
+        if self.engine.is_none() {
+            if let Some(mut rx) = self.engine_return_rx.take() {
+                match rx.try_recv() {
+                    Ok(engine) => {
+                        self.engine = Some(engine);
+                    }
+                    Err(oneshot::error::TryRecvError::Empty) => {
+                        // Engine hasn't been returned yet — put receiver back, retry next tick.
+                        self.engine_return_rx = Some(rx);
+                    }
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        // Sender was dropped without sending — engine is lost.
+                    }
+                }
+            }
         }
     }
 
@@ -756,36 +768,50 @@ impl App {
     }
 
     /// Poll for a completed background update check.
+    /// Shows the update notification once at startup, then never again.
     pub fn poll_update_check(&mut self) {
         if let Some(mut rx) = self.update_check_rx.take() {
             match rx.try_recv() {
                 Ok(Some(version)) => {
-                    let msg = if cfg!(target_os = "windows") {
-                        format!(
-                            "New version v{} available! Run: irm https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.ps1 | iex",
-                            version
-                        )
-                    } else {
-                        format!(
-                            "New version v{} available! Run: curl -fsSL https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.sh | sh",
-                            version
-                        )
-                    };
-                    self.system_message = Some(msg);
-                    self.system_message_type = SystemMessageType::Update;
-                    self.system_message_expires_at =
-                        Some(Instant::now() + Duration::from_secs(SYSTEM_MESSAGE_TTL_SECONDS));
+                    // Only show the update message if no other system message is active
+                    // (e.g., MCP connection info, errors). The update_check_rx is consumed
+                    // either way so this notification only fires once per session.
+                    if self.system_message.is_none() {
+                        let msg = if cfg!(target_os = "windows") {
+                            format!(
+                                "New version v{} available! Run: irm https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.ps1 | iex",
+                                version
+                            )
+                        } else {
+                            format!(
+                                "New version v{} available! Run: curl -fsSL https://raw.githubusercontent.com/ezeoli88/minmax-code/main/install.sh | sh",
+                                version
+                            )
+                        };
+                        self.system_message = Some(msg);
+                        self.system_message_type = SystemMessageType::Update;
+                        self.system_message_expires_at =
+                            Some(Instant::now() + Duration::from_secs(SYSTEM_MESSAGE_TTL_SECONDS));
+                    }
+                    // Do NOT put rx back — update check is consumed, won't show again.
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    // No update available — done.
+                }
                 Err(oneshot::error::TryRecvError::Empty) => {
+                    // Result not ready yet — put it back to retry next tick.
                     self.update_check_rx = Some(rx);
                 }
-                Err(_) => {}
+                Err(_) => {
+                    // Channel closed — done.
+                }
             }
         }
     }
 
     fn set_system_message(&mut self, msg: impl Into<String>) {
+        // Warnings/errors always take priority and overwrite any current message
+        // (including update notifications).
         self.system_message = Some(msg.into());
         self.system_message_type = SystemMessageType::Warning;
         self.system_message_expires_at =
