@@ -529,6 +529,11 @@
       <button class="copy-btn hidden" id="copyBtn" onclick="copyCommand()">Copy</button>
       <code id="commandText"></code>
     </div>
+    <p style="color:#565f89;text-align:center;margin:14px 0 8px;font-size:0.82rem;">or install via npm</p>
+    <div class="command-block">
+      <button class="copy-btn" id="copyNpmBtn" onclick="copyNpm()">Copy</button>
+      <code>npm install -g minmax-code</code>
+    </div>
     <p class="detected" id="detected"></p>
   </div>
 
@@ -715,6 +720,14 @@
     copyBtn.textContent = 'Copied!';
     copyBtn.classList.add('copied');
     setTimeout(() => { copyBtn.textContent = 'Copy'; copyBtn.classList.remove('copied'); }, 2000);
+  }
+
+  function copyNpm() {
+    const btn = document.getElementById('copyNpmBtn');
+    navigator.clipboard.writeText('npm install -g minmax-code');
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
   }
 
   document.querySelectorAll('.os-tab').forEach(tab => {
