@@ -16,9 +16,16 @@ use crate::tools;
 /// A question the agent wants to ask the user interactively.
 #[derive(Debug, Clone)]
 pub struct AgentQuestion {
+    pub header: String,
     pub question: String,
     pub options: Vec<String>,
     pub allow_custom: bool,
+}
+
+/// A batch of questions the agent wants to ask at once.
+#[derive(Debug, Clone)]
+pub struct AgentQuestionBatch {
+    pub questions: Vec<AgentQuestion>,
 }
 
 /// Wrapper around the response channel that implements Debug and Clone.
@@ -79,9 +86,9 @@ pub enum ChatEvent {
         completion_tokens: u64,
         total_tokens: u64,
     },
-    /// The agent needs to ask the user a question interactively.
+    /// The agent needs to ask the user one or more questions interactively.
     AskUser {
-        question: AgentQuestion,
+        batch: AgentQuestionBatch,
         response_tx: ResponseChannel,
     },
     /// The agent updated the todo/task list.
@@ -123,6 +130,7 @@ pub struct ChatEngine {
     session_id: Option<String>,
     session_store: Option<Arc<SessionStore>>,
     total_tokens: u64,
+    accumulated_completion_tokens: u64,
     cancel_token: CancellationToken,
     mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
 }
@@ -137,6 +145,7 @@ impl ChatEngine {
             session_id: None,
             session_store: None,
             total_tokens: 0,
+            accumulated_completion_tokens: 0,
             cancel_token: CancellationToken::new(),
             mcp_manager: None,
         }
@@ -170,6 +179,7 @@ impl ChatEngine {
     pub fn clear(&mut self) {
         self.history.clear();
         self.total_tokens = 0;
+        self.accumulated_completion_tokens = 0;
         self.cancel_token = CancellationToken::new();
     }
 
@@ -189,9 +199,15 @@ impl ChatEngine {
                 "You are a coding assistant in a terminal (READ-ONLY mode).\n\
                 Working directory: {}\n\n\
                 Available tools: read_file, glob, grep, list_directory, web_search (read-only), ask_user, todo_write.\n\
-                You CANNOT write, edit, or run commands. Tell the user to switch to BUILDER mode (Tab) for modifications.\n\
-                Focus on: analysis, planning, explaining code, suggesting strategies.\n\
-                Use ask_user to ask the user clarifying questions when you need more information to proceed.\n\
+                You CANNOT write, edit, or run commands in this mode.\n\
+                Focus on: analysis, planning, explaining code, suggesting implementation strategies.\n\
+                IMPORTANT: Never tell the user to manually copy, paste, or create files themselves. \
+                When proposing changes, explain what needs to be done and assure the user that \
+                you will implement all changes automatically when they switch to BUILDER mode (Tab). \
+                Your plans should describe the changes clearly but always frame execution as something you (the agent) will do.\n\
+                Use ask_user to ask the user clarifying questions when you need more information to proceed. \
+                IMPORTANT: If you have multiple questions, batch them ALL into a single ask_user call using the \"questions\" array parameter. \
+                Never ask questions one at a time — group every question you have into one ask_user call.\n\
                 Use todo_write to create a task list when you have a plan ready, tracking progress on multi-step work.",
                 cwd
             ),
@@ -204,7 +220,8 @@ impl ChatEngine {
                 - Use glob/grep to find files before reading them\n\
                 - Use bash for git, npm, and other CLI operations\n\
                 - Use web_search for current information, docs, or answers not in local files\n\
-                - Use ask_user when you need user clarification, confirmation, or to let the user choose between alternatives\n\
+                - Use ask_user when you need user clarification, confirmation, or to let the user choose between alternatives. \
+                IMPORTANT: If you have multiple questions, batch them ALL into a single ask_user call using the \"questions\" array. Never ask one at a time.\n\
                 - Use todo_write to create and update a task list when working on multi-step tasks\n\
                 - Execute one logical step at a time, verify results, then proceed\n\n\
                 Be concise. Show relevant code, skip obvious explanations.",
@@ -469,7 +486,11 @@ impl ChatEngine {
                 }
             };
 
-            self.total_tokens += result.usage.total_tokens;
+            // prompt_tokens includes the full context window each request (system prompt +
+            // history + tools), so we use the latest value instead of accumulating.
+            // completion_tokens are new tokens generated per request, so we accumulate those.
+            self.accumulated_completion_tokens += result.usage.completion_tokens;
+            self.total_tokens = result.usage.prompt_tokens + self.accumulated_completion_tokens;
 
             // Parse content for XML tool calls (fallback)
             let parsed = parse_model_output(&result.content);
@@ -666,30 +687,49 @@ impl ChatEngine {
                     } else if tc.function.name == "ask_user" {
                         // Handle ask_user synchronously
                         let args = &parsed_args[i];
-                        let question_text = args
-                            .get("question")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("What would you like to do?")
-                            .to_string();
-                        let options: Vec<String> = args
-                            .get("options")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(String::from))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let allow_custom = args
-                            .get("allow_custom")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(true);
 
-                        let question = AgentQuestion {
-                            question: question_text,
-                            options,
-                            allow_custom,
+                        // Parse questions: support both new `questions` array and legacy single-question format
+                        let questions: Vec<AgentQuestion> = if let Some(arr) = args.get("questions").and_then(|v| v.as_array()) {
+                            arr.iter().enumerate().map(|(qi, item)| {
+                                let header = item.get("header")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&format!("Q{}", qi + 1))
+                                    .to_string();
+                                let question_text = item.get("question")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("What would you like to do?")
+                                    .to_string();
+                                let options: Vec<String> = item.get("options")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                                    .unwrap_or_default();
+                                let allow_custom = item.get("allow_custom")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                AgentQuestion { header, question: question_text, options, allow_custom }
+                            }).collect()
+                        } else {
+                            // Legacy single-question format
+                            let question_text = args.get("question")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("What would you like to do?")
+                                .to_string();
+                            let options: Vec<String> = args.get("options")
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                                .unwrap_or_default();
+                            let allow_custom = args.get("allow_custom")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
+                            vec![AgentQuestion {
+                                header: "Question".to_string(),
+                                question: question_text,
+                                options,
+                                allow_custom,
+                            }]
                         };
+
+                        let batch = AgentQuestionBatch { questions: questions.clone() };
 
                         // Create oneshot channel for the response
                         let (resp_tx, resp_rx) = oneshot::channel::<String>();
@@ -699,9 +739,9 @@ impl ChatEngine {
                             name: "ask_user".to_string(),
                         });
 
-                        // Send the question to the UI
+                        // Send the batch to the UI
                         let _ = event_tx.send(ChatEvent::AskUser {
-                            question,
+                            batch,
                             response_tx: ResponseChannel(Arc::new(Mutex::new(Some(resp_tx)))),
                         });
 
@@ -724,13 +764,17 @@ impl ChatEngine {
                             result: user_answer.clone(),
                         });
 
+                        // Format result: single question uses simple format, multi uses structured
+                        let result_text = if questions.len() == 1 {
+                            format!("User responded: {}", user_answer)
+                        } else {
+                            format!("User responded to {} questions:\n{}", questions.len(), user_answer)
+                        };
+
                         results[i] = Some((
                             tc.id.clone(),
                             tc.function.name.clone(),
-                            tools::ToolExecutionResult::text(format!(
-                                "User responded: {}",
-                                user_answer
-                            )),
+                            tools::ToolExecutionResult::text(result_text),
                         ));
                     } else {
                         regular_indices.push(i);

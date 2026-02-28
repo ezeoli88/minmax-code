@@ -527,12 +527,25 @@ impl App {
                 if let Some(ref mut state) = self.agent_question_state {
                     let action = agent_question::handle_key(state, key);
                     match action {
-                        QuestionAction::Answer(answer) => {
+                        QuestionAction::SubmitAll(answers) => {
+                            // Format the response based on single vs multi
+                            let questions = &state.questions;
+                            let formatted = if questions.len() == 1 {
+                                answers[0].clone()
+                            } else {
+                                questions
+                                    .iter()
+                                    .zip(answers.iter())
+                                    .map(|(q, a)| format!("- {}: {}", q.header, a))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            };
+
                             // Send the answer back to the engine
                             if let Some(tx_channel) = self.agent_question_tx.take() {
                                 if let Ok(mut guard) = tx_channel.0.lock() {
                                     if let Some(tx) = guard.take() {
-                                        let _ = tx.send(answer);
+                                        let _ = tx.send(formatted);
                                     }
                                 }
                             }
@@ -939,11 +952,14 @@ impl App {
             ChatEvent::TokenUsage {
                 prompt_tokens,
                 completion_tokens,
-                total_tokens,
+                total_tokens: _,
             } => {
-                self.prompt_tokens += prompt_tokens;
+                // prompt_tokens reflects the full context window each request (system prompt +
+                // history + tools), so we take the latest value instead of accumulating.
+                // completion_tokens are new tokens generated per request, so we accumulate those.
+                self.prompt_tokens = prompt_tokens;
                 self.completion_tokens += completion_tokens;
-                self.total_tokens += total_tokens;
+                self.total_tokens = self.prompt_tokens + self.completion_tokens;
                 self.check_token_limits();
             }
             ChatEvent::Error(msg) => {
@@ -953,13 +969,13 @@ impl App {
                 self.todo_items = items;
             }
             ChatEvent::AskUser {
-                question,
+                batch,
                 response_tx,
             } => {
                 // Store the response sender so we can send back the answer
                 self.agent_question_tx = Some(response_tx);
                 // Create the overlay state and show it
-                self.agent_question_state = Some(AgentQuestionState::new(question));
+                self.agent_question_state = Some(AgentQuestionState::new(batch));
                 self.overlay = Overlay::AgentQuestion;
             }
             ChatEvent::ContextCompressed {
