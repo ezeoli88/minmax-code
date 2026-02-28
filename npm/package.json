@@ -1,6 +1,6 @@
 {
   "name": "minmax-code",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "description": "Terminal-native AI coding assistant powered by MiniMax LLM",
   "bin": {
     "minmax-code": "./run.js"
