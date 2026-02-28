@@ -310,6 +310,47 @@ impl MiniMaxClient {
             finish_reason,
         })
     }
+
+    /// Non-streaming completion for internal use (e.g. context summarization).
+    pub async fn simple_completion(&self, model: &str, prompt: &str) -> Result<String> {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "stream": false,
+            "temperature": 0.3,
+            "max_tokens": 2000,
+        });
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .headers(self.headers())
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            if let Ok(json) = serde_json::from_str::<Value>(&text) {
+                if let Some(mapped) = parse_minimax_error(&json) {
+                    return Err(anyhow!("API error {}: {}", status, mapped));
+                }
+            }
+            return Err(anyhow!("API error {}: {}", status, text));
+        }
+
+        let data: Value = response.json().await?;
+        let content = data["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        Ok(content)
+    }
 }
 
 fn parse_quota_info(data: &Value) -> Result<QuotaInfo> {

@@ -962,6 +962,16 @@ impl App {
                 self.agent_question_state = Some(AgentQuestionState::new(question));
                 self.overlay = Overlay::AgentQuestion;
             }
+            ChatEvent::ContextCompressed {
+                original_tokens,
+                compressed_tokens,
+            } => {
+                self.set_system_message(format!(
+                    "Context compressed: ~{}K → ~{}K tokens",
+                    original_tokens / 1000,
+                    compressed_tokens / 1000
+                ));
+            }
         }
     }
 

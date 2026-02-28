@@ -86,6 +86,11 @@ pub enum ChatEvent {
     },
     /// The agent updated the todo/task list.
     TodoUpdate(Vec<TodoItem>),
+    /// The context was compressed to fit within the token window.
+    ContextCompressed {
+        original_tokens: usize,
+        compressed_tokens: usize,
+    },
 }
 
 /// The final assistant message after streaming completes.
@@ -223,8 +228,147 @@ impl ChatEngine {
             "role": "system",
             "content": self.get_system_prompt()
         })];
-        messages.extend(self.history.clone());
+
+        let history_len = self.history.len();
+        // Keep the last ~3 turns intact (each turn ≈ 2 messages: user+assistant or tool)
+        let recent_threshold = history_len.saturating_sub(6);
+
+        for (i, msg) in self.history.iter().enumerate() {
+            let mut msg = msg.clone();
+            let is_old = i < recent_threshold;
+
+            if is_old {
+                // Strip reasoning_details from old assistant messages — the model
+                // doesn't need its own prior reasoning to continue the conversation.
+                if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.remove("reasoning_details");
+                    }
+                }
+
+                // Truncate long tool results to save context space.
+                if msg.get("role").and_then(|r| r.as_str()) == Some("tool") {
+                    if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                        if content.len() > 2000 {
+                            let safe_end = content
+                                .char_indices()
+                                .nth(500)
+                                .map(|(idx, _)| idx)
+                                .unwrap_or(content.len().min(500));
+                            let truncated = format!(
+                                "{}...\n[truncated, originally {} chars]",
+                                &content[..safe_end],
+                                content.len()
+                            );
+                            msg["content"] = serde_json::json!(truncated);
+                        }
+                    }
+                }
+            }
+
+            messages.push(msg);
+        }
+
         messages
+    }
+
+    /// Estimate the total number of tokens in the history using a chars/4 heuristic.
+    fn estimate_history_tokens(&self) -> usize {
+        self.history
+            .iter()
+            .map(|msg| {
+                let content_len = msg
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                let reasoning_len = msg
+                    .get("reasoning_details")
+                    .and_then(|r| serde_json::to_string(r).ok())
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                let tool_args_len = msg
+                    .get("tool_calls")
+                    .and_then(|t| serde_json::to_string(t).ok())
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                (content_len + reasoning_len + tool_args_len) / 4
+            })
+            .sum()
+    }
+
+    /// Compress old history by summarizing it via an API call when estimated
+    /// tokens exceed the threshold.  Recent messages are preserved intact.
+    async fn compress_history(
+        &mut self,
+        event_tx: &mpsc::UnboundedSender<ChatEvent>,
+    ) -> Result<()> {
+        const COMPRESSION_THRESHOLD: usize = 100_000;
+        const MESSAGES_TO_KEEP: usize = 10;
+
+        let estimated = self.estimate_history_tokens();
+        if estimated < COMPRESSION_THRESHOLD {
+            return Ok(());
+        }
+
+        let keep_count = MESSAGES_TO_KEEP.min(self.history.len());
+        let split_point = self.history.len().saturating_sub(keep_count);
+        if split_point == 0 {
+            return Ok(());
+        }
+
+        // Build a condensed version of old messages for the summarization prompt
+        let old_messages: Vec<String> = self.history[..split_point]
+            .iter()
+            .map(|m| {
+                let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+                let content: String = m
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(500)
+                    .collect();
+                format!("[{}]: {}", role, content)
+            })
+            .collect();
+
+        let summary_prompt = format!(
+            "Summarize this coding assistant conversation history concisely. Preserve:\n\
+             - Key decisions and context\n\
+             - Files that were read or modified and their purposes\n\
+             - Current task state and progress\n\
+             - Important code patterns or bugs found\n\n\
+             Conversation:\n{}",
+            old_messages.join("\n")
+        );
+
+        // Use the user's configured model for the summary
+        let summary = self
+            .client
+            .simple_completion(&self.model, &summary_prompt)
+            .await?;
+
+        // Replace old messages with the summary
+        let recent = self.history.split_off(split_point);
+        self.history.clear();
+        self.history.push(serde_json::json!({
+            "role": "user",
+            "content": format!("[Previous conversation summary]\n{}", summary)
+        }));
+        self.history.push(serde_json::json!({
+            "role": "assistant",
+            "content": "Understood. I have the context from our previous conversation. Let me continue."
+        }));
+        self.history.extend(recent);
+
+        let compressed = self.estimate_history_tokens();
+        let _ = event_tx.send(ChatEvent::ContextCompressed {
+            original_tokens: estimated,
+            compressed_tokens: compressed,
+        });
+
+        Ok(())
     }
 
     /// Send a user message and run the agentic loop.
@@ -263,6 +407,14 @@ impl ChatEngine {
             }
 
             let _ = event_tx.send(ChatEvent::StreamStart);
+
+            // Compress history if approaching context window limit
+            if let Err(e) = self.compress_history(&event_tx).await {
+                let _ = event_tx.send(ChatEvent::Error(format!(
+                    "Context compression failed (non-fatal): {}",
+                    e
+                )));
+            }
 
             let mut tool_defs = tools::get_tool_definitions(self.mode);
             // Append MCP tool definitions if available
@@ -776,5 +928,93 @@ mod tests {
         assert_eq!(full.len(), 2);
         assert_eq!(full[0]["role"], "system");
         assert_eq!(full[1]["role"], "user");
+    }
+
+    #[test]
+    fn estimate_tokens_basic() {
+        let client = MiniMaxClient::new("test");
+        let mut engine = ChatEngine::new(client, "MiniMax-M2.5", Mode::Builder);
+        // 400 chars ≈ 100 tokens
+        engine
+            .history
+            .push(serde_json::json!({"role": "user", "content": "a".repeat(400)}));
+        assert_eq!(engine.estimate_history_tokens(), 100);
+    }
+
+    #[test]
+    fn estimate_tokens_empty_history() {
+        let client = MiniMaxClient::new("test");
+        let engine = ChatEngine::new(client, "MiniMax-M2.5", Mode::Builder);
+        assert_eq!(engine.estimate_history_tokens(), 0);
+    }
+
+    #[test]
+    fn build_full_history_strips_old_reasoning() {
+        let client = MiniMaxClient::new("test");
+        let mut engine = ChatEngine::new(client, "MiniMax-M2.5", Mode::Builder);
+
+        // Add 10 messages to ensure some are "old" (threshold = len - 6)
+        for i in 0..5 {
+            engine.history.push(serde_json::json!({
+                "role": "user",
+                "content": format!("question {}", i)
+            }));
+            engine.history.push(serde_json::json!({
+                "role": "assistant",
+                "content": format!("answer {}", i),
+                "reasoning_details": [{"text": "long reasoning here"}]
+            }));
+        }
+
+        let full = engine.build_full_history();
+        // First assistant message (index 2, old) should have reasoning stripped
+        assert!(full[2].get("reasoning_details").is_none());
+        // Last assistant message (index 10, recent) should keep reasoning
+        assert!(full[10].get("reasoning_details").is_some());
+    }
+
+    #[test]
+    fn build_full_history_truncates_old_tool_results() {
+        let client = MiniMaxClient::new("test");
+        let mut engine = ChatEngine::new(client, "MiniMax-M2.5", Mode::Builder);
+
+        // Add enough messages so the tool result is "old"
+        let long_content = "x".repeat(5000);
+        engine.history.push(serde_json::json!({
+            "role": "tool",
+            "content": long_content,
+            "tool_call_id": "tc_1"
+        }));
+        // Add 6 more recent messages to push the tool result past the threshold
+        for _ in 0..6 {
+            engine.history.push(serde_json::json!({
+                "role": "user",
+                "content": "msg"
+            }));
+        }
+
+        let full = engine.build_full_history();
+        // The tool result (index 1 in full, after system) should be truncated
+        let tool_content = full[1]["content"].as_str().unwrap();
+        assert!(tool_content.len() < 5000);
+        assert!(tool_content.contains("[truncated"));
+    }
+
+    #[test]
+    fn build_full_history_keeps_recent_tool_results_intact() {
+        let client = MiniMaxClient::new("test");
+        let mut engine = ChatEngine::new(client, "MiniMax-M2.5", Mode::Builder);
+
+        let long_content = "x".repeat(5000);
+        // Add as a recent message (within the last 6)
+        engine.history.push(serde_json::json!({
+            "role": "tool",
+            "content": long_content,
+            "tool_call_id": "tc_1"
+        }));
+
+        let full = engine.build_full_history();
+        let tool_content = full[1]["content"].as_str().unwrap();
+        assert_eq!(tool_content.len(), 5000);
     }
 }
