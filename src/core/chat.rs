@@ -198,7 +198,7 @@ impl ChatEngine {
             Mode::Plan => format!(
                 "You are a coding assistant in a terminal (READ-ONLY mode).\n\
                 Working directory: {}\n\n\
-                Available tools: read_file, glob, grep, list_directory, web_search (read-only), ask_user, todo_write.\n\
+                Available tools: read_file, glob, grep, list_directory, web_search, web_fetch (read-only), ask_user, todo_write.\n\
                 You CANNOT write, edit, or run commands in this mode.\n\
                 Focus on: analysis, planning, explaining code, suggesting implementation strategies.\n\
                 IMPORTANT: Never tell the user to manually copy, paste, or create files themselves. \
@@ -219,7 +219,7 @@ impl ChatEngine {
                 - Use edit_file for modifications to existing files, write_file only for new files\n\
                 - Use glob/grep to find files before reading them\n\
                 - Use bash for git, npm, and other CLI operations\n\
-                - Use web_search for current information, docs, or answers not in local files\n\
+                - Use web_search for current information; use web_fetch to read the content of a specific URL\n\
                 - Use ask_user when you need user clarification, confirmation, or to let the user choose between alternatives. \
                 IMPORTANT: If you have multiple questions, batch them ALL into a single ask_user call using the \"questions\" array. Never ask one at a time.\n\
                 - Use todo_write to create and update a task list when working on multi-step tasks\n\
@@ -314,8 +314,16 @@ impl ChatEngine {
             .sum()
     }
 
-    /// Compress old history by summarizing it via an API call when estimated
-    /// tokens exceed the threshold.  Recent messages are preserved intact.
+    /// Compress old history when estimated tokens exceed the threshold.
+    ///
+    /// Uses a two-phase strategy:
+    /// 1. **Granular truncation** — collapse individual old tool results to
+    ///    one-line summaries preserving file paths and key metadata, strip old
+    ///    reasoning, and trim verbose assistant messages.
+    /// 2. **Summarization** — if granular truncation isn't enough (still over
+    ///    the threshold), summarize the oldest messages via an API call.
+    ///
+    /// Recent messages are always preserved intact.
     async fn compress_history(
         &mut self,
         event_tx: &mpsc::UnboundedSender<ChatEvent>,
@@ -334,7 +342,61 @@ impl ChatEngine {
             return Ok(());
         }
 
-        // Build a condensed version of old messages for the summarization prompt
+        // ── Phase 1: Granular truncation of old messages ──────────────
+        for msg in self.history[..split_point].iter_mut() {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+
+            match role {
+                "tool" => {
+                    // Collapse tool results to a compact summary preserving paths
+                    if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                        if content.len() > 300 {
+                            let tool_name = msg
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("tool");
+                            let summary = collapse_tool_result(tool_name, content);
+                            msg["content"] = serde_json::json!(summary);
+                        }
+                    }
+                }
+                "assistant" => {
+                    // Strip reasoning details from old assistant messages
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.remove("reasoning_details");
+                    }
+                    // Truncate verbose assistant content (keep first 300 chars)
+                    if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                        if content.len() > 500 {
+                            let safe_end = content
+                                .char_indices()
+                                .nth(300)
+                                .map(|(idx, _)| idx)
+                                .unwrap_or(300);
+                            let truncated = format!(
+                                "{}... [truncated from {} chars]",
+                                &content[..safe_end],
+                                content.len()
+                            );
+                            msg["content"] = serde_json::json!(truncated);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Re-estimate after granular truncation
+        let after_granular = self.estimate_history_tokens();
+        if after_granular < COMPRESSION_THRESHOLD {
+            let _ = event_tx.send(ChatEvent::ContextCompressed {
+                original_tokens: estimated,
+                compressed_tokens: after_granular,
+            });
+            return Ok(());
+        }
+
+        // ── Phase 2: Summarize oldest messages via API call ───────────
         let old_messages: Vec<String> = self.history[..split_point]
             .iter()
             .map(|m| {
@@ -353,14 +415,14 @@ impl ChatEngine {
         let summary_prompt = format!(
             "Summarize this coding assistant conversation history concisely. Preserve:\n\
              - Key decisions and context\n\
-             - Files that were read or modified and their purposes\n\
+             - ALL file paths that were read, modified, or created\n\
              - Current task state and progress\n\
-             - Important code patterns or bugs found\n\n\
+             - Important code patterns or bugs found\n\
+             - Tool names and their outcomes\n\n\
              Conversation:\n{}",
             old_messages.join("\n")
         );
 
-        // Use the user's configured model for the summary
         let summary = self
             .client
             .simple_completion(&self.model, &summary_prompt)
@@ -669,8 +731,9 @@ impl ChatEngine {
                         let _ = event_tx.send(ChatEvent::TodoUpdate(items));
 
                         let result_msg = format!(
-                            "Todo list updated ({}/{} completed)",
-                            completed, item_count
+                            "Todo list updated ({}/{} completed){}",
+                            completed, item_count,
+                            tools::system_reminder(self.mode, "todo_write")
                         );
 
                         let _ = event_tx.send(ChatEvent::ToolExecutionDone {
@@ -765,10 +828,11 @@ impl ChatEngine {
                         });
 
                         // Format result: single question uses simple format, multi uses structured
+                        let reminder = tools::system_reminder(self.mode, "ask_user");
                         let result_text = if questions.len() == 1 {
-                            format!("User responded: {}", user_answer)
+                            format!("User responded: {}{}", user_answer, reminder)
                         } else {
-                            format!("User responded to {} questions:\n{}", questions.len(), user_answer)
+                            format!("User responded to {} questions:\n{}{}", questions.len(), user_answer, reminder)
                         };
 
                         results[i] = Some((
@@ -914,6 +978,95 @@ impl ChatEngine {
     ) {
         if let (Some(session_id), Some(store)) = (&self.session_id, &self.session_store) {
             let _ = store.save_message(session_id, role, content, tool_calls, tool_call_id, name);
+        }
+    }
+}
+
+/// Collapse a tool result to a compact one-line summary, preserving structural
+/// metadata like file paths, line numbers, and key outcomes.
+fn collapse_tool_result(tool_name: &str, content: &str) -> String {
+    match tool_name {
+        "read_file" => {
+            // Preserve the file path and line count
+            let line_count = content.lines().count();
+            let first_line = content.lines().next().unwrap_or("");
+            format!(
+                "[read_file: {} lines, starts with: {}]",
+                line_count,
+                &first_line[..first_line.len().min(100)]
+            )
+        }
+        "glob" => {
+            // Preserve all file paths (they're compact and structurally important)
+            let paths: Vec<&str> = content.lines().take(20).collect();
+            let total = content.lines().count();
+            if total > 20 {
+                format!(
+                    "{}\n...and {} more paths",
+                    paths.join("\n"),
+                    total - 20
+                )
+            } else {
+                content.to_string()
+            }
+        }
+        "grep" => {
+            // Keep file:line references, drop matched content
+            let summaries: Vec<String> = content
+                .lines()
+                .take(15)
+                .map(|line| {
+                    // Preserve "path:line:" prefix, truncate content
+                    if let Some(colon_pos) = line.find(':') {
+                        if let Some(second_colon) = line[colon_pos + 1..].find(':') {
+                            let prefix_end = colon_pos + 1 + second_colon + 1;
+                            if prefix_end < line.len() {
+                                return format!(
+                                    "{}...",
+                                    &line[..prefix_end.min(line.len())]
+                                );
+                            }
+                        }
+                    }
+                    line[..line.len().min(80)].to_string()
+                })
+                .collect();
+            let total = content.lines().count();
+            let mut result = summaries.join("\n");
+            if total > 15 {
+                result.push_str(&format!("\n...and {} more matches", total - 15));
+            }
+            result
+        }
+        "edit_file" | "write_file" => {
+            // Extract file path from the result message
+            let first_line = content.lines().next().unwrap_or(content);
+            first_line[..first_line.len().min(200)].to_string()
+        }
+        "bash" => {
+            // Keep first and last few lines, drop the middle
+            let lines: Vec<&str> = content.lines().collect();
+            if lines.len() <= 5 {
+                content.to_string()
+            } else {
+                let head: Vec<&str> = lines.iter().take(3).copied().collect();
+                let tail: Vec<&str> = lines.iter().rev().take(2).rev().copied().collect();
+                format!(
+                    "{}\n... [{} lines omitted] ...\n{}",
+                    head.join("\n"),
+                    lines.len() - 5,
+                    tail.join("\n")
+                )
+            }
+        }
+        _ => {
+            // Generic: keep first 200 chars
+            let safe_end = content
+                .char_indices()
+                .nth(200)
+                .map(|(idx, _)| idx)
+                .unwrap_or(content.len());
+            format!("{}... [truncated from {} chars]", &content[..safe_end], content.len())
         }
     }
 }

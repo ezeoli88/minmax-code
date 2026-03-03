@@ -3,9 +3,11 @@ pub mod bash;
 pub mod edit_file;
 pub mod glob;
 pub mod grep;
+pub mod lint;
 pub mod list_dir;
 pub mod read_file;
 pub mod todo_write;
+pub mod web_fetch;
 pub mod web_search;
 pub mod write_file;
 
@@ -13,6 +15,30 @@ use crate::core::Mode;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::LazyLock;
+
+/// Returns a brief system reminder to append to tool results.
+/// These reminders reinforce key instructions from the system prompt and help
+/// combat "lost in the middle" attention decay in long conversations.
+pub fn system_reminder(mode: Mode, tool_name: &str) -> String {
+    let mode_hint = match mode {
+        Mode::Plan => "Mode: PLAN (read-only). You cannot write/edit/run commands.",
+        Mode::Builder => "Mode: BUILDER. Always read_file before edit_file.",
+    };
+
+    let tool_hint = match tool_name {
+        "edit_file" | "write_file" => " Verify the change is correct before proceeding.",
+        "bash" => " Check exit code. Use dedicated tools (read_file, glob, grep) over bash when possible.",
+        "read_file" => "",
+        "glob" | "grep" => " Use read_file to examine matches before editing.",
+        "web_search" | "web_fetch" => "",
+        _ => "",
+    };
+
+    format!(
+        "\n\n<system-reminder>{}{} Batch ask_user questions. Use todo_write for multi-step tasks.</system-reminder>",
+        mode_hint, tool_hint
+    )
+}
 
 /// Metadata about a tool execution result, used for rich UI rendering.
 #[derive(Debug, Clone)]
@@ -56,6 +82,7 @@ static READ_ONLY_TOOLS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     s.insert("grep");
     s.insert("list_directory");
     s.insert("web_search");
+    s.insert("web_fetch");
     s.insert("ask_user");
     s.insert("todo_write");
     s
@@ -72,6 +99,7 @@ pub fn get_tool_definitions(mode: Mode) -> Vec<Value> {
         grep::definition(),
         list_dir::definition(),
         web_search::definition(),
+        web_fetch::definition(),
         ask_user::definition(),
         todo_write::definition(),
     ];
@@ -106,7 +134,7 @@ pub async fn execute_tool(
         ));
     }
 
-    match name {
+    let mut result = match name {
         "bash" => bash::execute(args).await,
         "read_file" => read_file::execute(args).await,
         "write_file" => write_file::execute(args).await,
@@ -115,6 +143,11 @@ pub async fn execute_tool(
         "grep" => grep::execute(args).await,
         "list_directory" => list_dir::execute(args).await,
         "web_search" => web_search::execute(args).await,
+        "web_fetch" => web_fetch::execute(args).await,
         _ => ToolExecutionResult::text(format!("Error: Unknown tool \"{}\"", name)),
-    }
+    };
+
+    // Append system reminder to reinforce instructions across long conversations
+    result.result.push_str(&system_reminder(mode, name));
+    result
 }
