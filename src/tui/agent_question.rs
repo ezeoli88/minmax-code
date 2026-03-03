@@ -365,13 +365,18 @@ fn render_single(frame: &mut Frame, area: Rect, state: &AgentQuestionState, them
     let s = &state.states[0];
 
     let item_count = s.item_count(q);
+    let palette_width = 60u16.min(area.width.saturating_sub(4));
+    let popup_inner_width = palette_width.saturating_sub(2) as usize;
     let extra_lines: u16 = match s.view {
-        QuestionView::CustomInput => 3,
+        QuestionView::CustomInput => custom_input_lines(
+            s.custom_text.chars().count(),
+            " > ".chars().count(),
+            popup_inner_width,
+        ),
         QuestionView::Selecting => 0,
     };
     let content_height = 2 + item_count as u16 + extra_lines;
     let palette_height = (content_height + 2).min(area.height.saturating_sub(4));
-    let palette_width = 60u16.min(area.width.saturating_sub(4));
     let x = (area.width.saturating_sub(palette_width)) / 2;
     let y = (area.height.saturating_sub(palette_height)) / 2;
     let popup_area = Rect::new(x, y, palette_width, palette_height);
@@ -399,7 +404,7 @@ fn render_single(frame: &mut Frame, area: Rect, state: &AgentQuestionState, them
 
     // Custom input area
     if s.view == QuestionView::CustomInput {
-        render_custom_input(&mut lines, s, accent, text_color, dim);
+        render_custom_input(&mut lines, s, accent, text_color, dim, popup_inner_width);
     }
 
     let title = " Agent Question (\u{2191}\u{2193} Enter) ";
@@ -420,14 +425,19 @@ fn render_multi(frame: &mut Frame, area: Rect, state: &AgentQuestionState, theme
     let s = &state.states[state.active_tab];
 
     let item_count = s.item_count(q);
+    let palette_width = 64u16.min(area.width.saturating_sub(4));
+    let popup_inner_width = palette_width.saturating_sub(2) as usize;
     let extra_lines: u16 = match s.view {
-        QuestionView::CustomInput => 3,
+        QuestionView::CustomInput => custom_input_lines(
+            s.custom_text.chars().count(),
+            " > ".chars().count(),
+            popup_inner_width,
+        ),
         QuestionView::Selecting => 0,
     };
     // tab_bar(1) + blank(1) + question(1) + blank(1) + items + extra + border(2)
     let content_height = 4 + item_count as u16 + extra_lines;
     let palette_height = (content_height + 2).min(area.height.saturating_sub(4));
-    let palette_width = 64u16.min(area.width.saturating_sub(4));
     let x = (area.width.saturating_sub(palette_width)) / 2;
     let y = (area.height.saturating_sub(palette_height)) / 2;
     let popup_area = Rect::new(x, y, palette_width, palette_height);
@@ -537,7 +547,7 @@ fn render_multi(frame: &mut Frame, area: Rect, state: &AgentQuestionState, theme
 
         // Custom input area
         if s.view == QuestionView::CustomInput {
-            render_custom_input(&mut lines, s, accent, text_color, dim);
+            render_custom_input(&mut lines, s, accent, text_color, dim, popup_inner_width);
         }
     }
 
@@ -594,33 +604,69 @@ fn render_options<'a>(
     }
 }
 
-/// Render the custom input area.
+/// Render the custom input area with wrapping for long text.
 fn render_custom_input(
     lines: &mut Vec<Line>,
     s: &SingleQuestionState,
     accent: Color,
     text_color: Color,
     dim: Color,
+    inner_width: usize,
 ) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " Type your response (Enter to submit, Esc to go back):",
         Style::default().fg(dim),
     )));
-    let input_display = if s.custom_text.is_empty() {
-        "Type here...".to_string()
-    } else {
-        s.custom_text.clone()
-    };
-    let input_style = if s.custom_text.is_empty() {
-        Style::default().fg(dim)
-    } else {
-        Style::default().fg(text_color)
-    };
-    lines.push(Line::from(vec![
-        Span::styled(" > ", Style::default().fg(accent).bold()),
-        Span::styled(input_display, input_style),
-    ]));
+
+    let prefix = " > ";
+    let prefix_chars = prefix.chars().count();
+
+    if s.custom_text.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(accent).bold()),
+            Span::styled("Type here...", Style::default().fg(dim)),
+        ]));
+        return;
+    }
+
+    let input_style = Style::default().fg(text_color);
+
+    // Build full display: prefix + text, then wrap manually
+    let full_text: String = format!("{}{}", prefix, s.custom_text);
+    let full_chars: Vec<char> = full_text.chars().collect();
+
+    // Available width for wrapping (popup inner width with 1-char padding each side)
+    let wrap_width = if inner_width > 2 { inner_width - 2 } else { 1 };
+
+    let mut global_offset = 0usize;
+    for chunk in full_chars.chunks(wrap_width) {
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, &ch) in chunk.iter().enumerate() {
+            let char_idx = global_offset + i;
+            let style = if char_idx < prefix_chars {
+                Style::default().fg(accent).bold()
+            } else {
+                input_style
+            };
+            spans.push(Span::styled(String::from(ch), style));
+        }
+        global_offset += chunk.len();
+        lines.push(Line::from(spans));
+    }
+}
+
+/// Calculate how many extra lines the custom input needs (for popup height).
+fn custom_input_lines(text_len: usize, prefix_len: usize, inner_width: usize) -> u16 {
+    let wrap_width = if inner_width > 2 { inner_width - 2 } else { 1 };
+    let total_chars = prefix_len + text_len;
+    if total_chars == 0 {
+        // blank line + instruction + 1 input line = 3
+        return 3;
+    }
+    let wrapped_lines = (total_chars + wrap_width - 1) / wrap_width;
+    // blank line + instruction line + wrapped input lines
+    (2 + wrapped_lines) as u16
 }
 
 #[cfg(test)]

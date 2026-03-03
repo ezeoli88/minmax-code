@@ -42,7 +42,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_chat_screen(frame: &mut Frame, app: &App, theme: &crate::config::themes::Theme) {
     let area = frame.area();
 
-    // Layout: Header(3) | TodoPanel?(N) | Chat(flex) | SystemMsg?(1) | Input(3) | StatusBar(1)
+    // Layout: Header(3) | TodoPanel?(N) | Chat(flex) | SystemMsg?(1) | Input(3-10) | StatusBar(1)
     let has_system_msg = app.system_message.is_some();
     let has_todos = !app.todo_items.is_empty();
     let todo_height = if has_todos {
@@ -59,7 +59,8 @@ fn draw_chat_screen(frame: &mut Frame, app: &App, theme: &crate::config::themes:
     if has_system_msg {
         constraints.push(Constraint::Length(1)); // System message
     }
-    constraints.push(Constraint::Length(3)); // Input
+    let input_height = input::calculate_height(app, area.width);
+    constraints.push(Constraint::Length(input_height)); // Input (dynamic)
     constraints.push(Constraint::Length(1)); // Status bar
 
     let chunks = Layout::vertical(constraints).split(area);

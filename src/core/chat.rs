@@ -194,50 +194,58 @@ impl ChatEngine {
             .to_string_lossy()
             .to_string();
 
-        let base = match self.mode {
-            Mode::Plan => format!(
-                "You are a coding assistant in a terminal (READ-ONLY mode).\n\
-                Working directory: {}\n\n\
+        // Shared base prompt for both modes
+        let base = format!(
+            "You are MinMax Code, a coding assistant running in a terminal.\n\
+            Working directory: {}\n\n\
+            CONTEXT CONTINUITY: The user can switch between PLAN (read-only) and BUILDER (full access) modes at any time. \
+            Mode changes do NOT reset the conversation — you retain full memory of everything discussed, \
+            all files read, all decisions made, and all plans created. Always continue from where the conversation left off. \
+            If the user just switched modes, acknowledge it briefly and continue working on the current task.\n\n\
+            GENERAL RULES:\n\
+            - Use ask_user when you need user clarification, confirmation, or to let the user choose between alternatives. \
+            IMPORTANT: If you have multiple questions, batch them ALL into a single ask_user call using the \"questions\" array parameter. \
+            Never ask questions one at a time — group every question you have into one ask_user call.\n\
+            - Use todo_write to create and update a task list when working on multi-step tasks.\n\
+            - Be concise. Show relevant code, skip obvious explanations.",
+            cwd
+        );
+
+        // Mode-specific appendix
+        let mode_section = match self.mode {
+            Mode::Plan => "\n\n\
+                CURRENT MODE: READ-ONLY (PLAN)\n\
                 Available tools: read_file, glob, grep, list_directory, web_search (read-only), ask_user, todo_write.\n\
                 You CANNOT write, edit, or run commands in this mode.\n\
                 Focus on: analysis, planning, explaining code, suggesting implementation strategies.\n\
                 IMPORTANT: Never tell the user to manually copy, paste, or create files themselves. \
                 When proposing changes, explain what needs to be done and assure the user that \
                 you will implement all changes automatically when they switch to BUILDER mode (Tab). \
-                Your plans should describe the changes clearly but always frame execution as something you (the agent) will do.\n\
-                Use ask_user to ask the user clarifying questions when you need more information to proceed. \
-                IMPORTANT: If you have multiple questions, batch them ALL into a single ask_user call using the \"questions\" array parameter. \
-                Never ask questions one at a time — group every question you have into one ask_user call.\n\
-                Use todo_write to create a task list when you have a plan ready, tracking progress on multi-step work.",
-                cwd
-            ),
-            Mode::Builder => format!(
-                "You are a coding assistant in a terminal.\n\
-                Working directory: {}\n\n\
+                Your plans should describe the changes clearly but always frame execution as something you (the agent) will do."
+                .to_string(),
+            Mode::Builder => "\n\n\
+                CURRENT MODE: BUILDER (full access)\n\
                 TOOL USAGE:\n\
                 - Read before editing: always use read_file before edit_file to see current content\n\
                 - Use edit_file for modifications to existing files, write_file only for new files\n\
                 - Use glob/grep to find files before reading them\n\
                 - Use bash for git, npm, and other CLI operations\n\
                 - Use web_search for current information, docs, or answers not in local files\n\
-                - Use ask_user when you need user clarification, confirmation, or to let the user choose between alternatives. \
-                IMPORTANT: If you have multiple questions, batch them ALL into a single ask_user call using the \"questions\" array. Never ask one at a time.\n\
-                - Use todo_write to create and update a task list when working on multi-step tasks\n\
-                - Execute one logical step at a time, verify results, then proceed\n\n\
-                Be concise. Show relevant code, skip obvious explanations.",
-                cwd
-            ),
+                - Execute one logical step at a time, verify results, then proceed"
+                .to_string(),
         };
+
+        let mut prompt = format!("{}{}", base, mode_section);
 
         // Load agent.md if present
         let agent_path = std::path::Path::new(&cwd).join("agent.md");
         if agent_path.exists() {
             if let Ok(agent_content) = std::fs::read_to_string(&agent_path) {
-                return format!("{}\n\n--- agent.md ---\n{}", base, agent_content);
+                prompt = format!("{}\n\n--- agent.md ---\n{}", prompt, agent_content);
             }
         }
 
-        base
+        prompt
     }
 
     fn build_full_history(&self) -> Vec<Value> {
@@ -247,8 +255,8 @@ impl ChatEngine {
         })];
 
         let history_len = self.history.len();
-        // Keep the last ~3 turns intact (each turn ≈ 2 messages: user+assistant or tool)
-        let recent_threshold = history_len.saturating_sub(6);
+        // Keep the last ~10 turns intact (each turn ≈ 2 messages: user+assistant or tool)
+        let recent_threshold = history_len.saturating_sub(20);
 
         for (i, msg) in self.history.iter().enumerate() {
             let mut msg = msg.clone();
@@ -266,12 +274,12 @@ impl ChatEngine {
                 // Truncate long tool results to save context space.
                 if msg.get("role").and_then(|r| r.as_str()) == Some("tool") {
                     if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                        if content.len() > 2000 {
+                        if content.len() > 4000 {
                             let safe_end = content
                                 .char_indices()
-                                .nth(500)
+                                .nth(1500)
                                 .map(|(idx, _)| idx)
-                                .unwrap_or(content.len().min(500));
+                                .unwrap_or(content.len().min(1500));
                             let truncated = format!(
                                 "{}...\n[truncated, originally {} chars]",
                                 &content[..safe_end],
@@ -321,7 +329,7 @@ impl ChatEngine {
         event_tx: &mpsc::UnboundedSender<ChatEvent>,
     ) -> Result<()> {
         const COMPRESSION_THRESHOLD: usize = 100_000;
-        const MESSAGES_TO_KEEP: usize = 10;
+        const MESSAGES_TO_KEEP: usize = 20;
 
         let estimated = self.estimate_history_tokens();
         if estimated < COMPRESSION_THRESHOLD {
@@ -344,18 +352,22 @@ impl ChatEngine {
                     .and_then(|c| c.as_str())
                     .unwrap_or("")
                     .chars()
-                    .take(500)
+                    .take(1000)
                     .collect();
                 format!("[{}]: {}", role, content)
             })
             .collect();
 
         let summary_prompt = format!(
-            "Summarize this coding assistant conversation history concisely. Preserve:\n\
-             - Key decisions and context\n\
-             - Files that were read or modified and their purposes\n\
-             - Current task state and progress\n\
-             - Important code patterns or bugs found\n\n\
+            "Summarize this coding assistant conversation history. This summary will replace the original messages \
+             in the conversation context, so it must preserve all essential information needed to continue working.\n\n\
+             MUST preserve:\n\
+             - All file paths that were read, created, or modified\n\
+             - Key decisions made and their reasoning\n\
+             - Current task state and what remains to be done\n\
+             - Important code patterns, bugs found, or errors encountered\n\
+             - User preferences or constraints mentioned\n\
+             - Any architectural or design decisions\n\n\
              Conversation:\n{}",
             old_messages.join("\n")
         );
@@ -371,11 +383,15 @@ impl ChatEngine {
         self.history.clear();
         self.history.push(serde_json::json!({
             "role": "user",
-            "content": format!("[Previous conversation summary]\n{}", summary)
+            "content": format!(
+                "[CONVERSATION CONTEXT — Summary of {} earlier messages]\n\
+                 The following is a summary of our conversation so far. \
+                 All files, decisions, and progress described below are real and should be treated as established context.\n\n\
+                 {}", split_point, summary)
         }));
         self.history.push(serde_json::json!({
             "role": "assistant",
-            "content": "Understood. I have the context from our previous conversation. Let me continue."
+            "content": "Understood. I have full context from our previous conversation and will continue seamlessly from where we left off."
         }));
         self.history.extend(recent);
 
